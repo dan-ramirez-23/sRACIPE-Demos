@@ -36,6 +36,7 @@ for(topo_name in topo_list) {
 
   ## SIMULATION (w/ time cost benchmarking)
   mb_rs_fname <- file.path(dataDir,"microbenchmark_simulation_results.Rds")
+  racipe_fname <- file.path(dataDir,"racipe.Rds")
   if(!file.exists(mb_rs_fname)) {
     mb_rs <- microbenchmark({
       racipe <- sracipeSimulate(topo, numModels = 1000, nIC = 100)
