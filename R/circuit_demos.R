@@ -48,9 +48,21 @@ for(topo_name in topo_list) {
   }
 
 
-  ## GET UNIQUE STEADY STATES
+  ## TODO: GET UNIQUE STEADY STATES
+  ss_unique_fname <- file.path(dataDir,"ss_unique.Rds")
+  racipe_summary_fname <- file.path(dataDir,"racipe_summary.Rds")
+  if(!file.exists(ss_unique_fname)) {
+
+
+    #saveRDS(ss_unique, ss_unique_fname)
+    #saveRDS(racipe_summary_df, racipe_summary_fname)
+  } else {
+    ss_unique <- readRDS(ss_unique_fname)
+    racipe_summary_df <- readRDS(racipe_summary_fname)
+  }
 
   ## NORMALIZATION
+  ## TODO: adjust normalization to only focus on unique steady states
   genes <- rownames(racipe)
   unnormData <- t(assay(racipe))
   simExp <- assay(racipe, 1)
@@ -66,6 +78,9 @@ for(topo_name in topo_list) {
   ## PCA
   pca_fname <- file.path(dataDir,"pca.Rds")
   if(!file.exists(pca_fname)) {
+
+    pca <- prcomp(ss_unique)
+
     saveRDS(pca, pca_fname)
   } else {
     pca <- readRDS(pca_fname)
