@@ -5,6 +5,7 @@ library(sRACIPE)                 # GRN simulation
 library(ggplot2)                 # plotting
 library(microbenchmark)          # time cost benchmarking
 library(dplyr)                   # data management
+library(ComplexHeatmap)          # plotting
 
 
 # seed for reproducibility & color palette for plots
@@ -12,8 +13,8 @@ set.seed(1234)
 cbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")[c(3,2,4:8)]
 
 
-topo_list <- c("toggleSwitch", "CTS", "TS_rep_2", "cellcycle")
-k_list <- c(2, 4, 3, 6) # expected number of clusters for each topo
+topo_list <- c("toggleSwitch", "CTS", "TS_rep_2") #, "cellcycle")
+k_list <- c(2, 4, 3)#, 6) # expected number of clusters for each topo
 names(k_list) <- topo_list
 
 nModels <- 1000
@@ -68,7 +69,7 @@ for(topo_name in topo_list) {
       mutate(State = row_number()) %>%
       ungroup()
 
-    racipe_summary_df <- unique_states %>%
+    racipe_summary_df <- ss_unique %>%
       group_by(Model) %>%
       summarise(NumStates = n(), .groups = "drop")
 
@@ -80,25 +81,20 @@ for(topo_name in topo_list) {
   }
 
   ## NORMALIZATION
-  ## TODO: adjust normalization to only focus on unique steady states
   ## TODO: save a RACIPE object with unique steady states as ICs for later sims?
   genes <- rownames(racipe)
-  unnormData <- t(assay(racipe))
-  simExp <- assay(racipe, 1)
-  simExp <- log2(1+simExp)
-  tmpMeans <- rowMeans(simExp)
-  tmpSds <- apply(simExp,1,sd)
-
-  racipeNorm <- sracipeNormalize(racipe)
-  racipeData <- as.data.frame(t(assay(racipeNorm)))
-  exprMat_norm <- racipeData
-
+  expr_mat <- ss_unique[,genes]
+  tmpMeans <- rowMeans(t(log2(1+expr_mat)))
+  tmpSds <- apply(t(log2(1+expr_mat)),1,sd)
+  expr_mat_norm <- log2(1+expr_mat)
+  expr_mat_norm[,genes] <- sweep(expr_mat_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+  expr_mat_norm[,genes] <- sweep(expr_mat_norm[,genes], 2, tmpSds, FUN = "/") # scale
 
   ## PCA
   pca_fname <- file.path(dataDir,"pca.Rds")
   if(!file.exists(pca_fname)) {
 
-    pca <- prcomp(ss_unique)
+    pca <- prcomp(expr_mat_norm[,genes])
 
     saveRDS(pca, pca_fname)
   } else {
@@ -112,17 +108,52 @@ for(topo_name in topo_list) {
     pca_data <- pca$x
     dist_mat <- dist(pca_data)
     hc <- hclust(dist_mat, method = "ward.D2")
-    cluster_labels <- cutree(hc, k = k)
+    cluster_labels <- cutree(hc, k = k_use)
     saveRDS(cluster_labels, clust_fname)
   } else {
     cluster_labels <- readRDS(clust_fname)
   }
 
   ## PLOTS
-
   # PCA
+  pc1_weight <- round(100*summary(pca)$importance[2,1],2)
+  pc2_weight <- round(100*summary(pca)$importance[2,2],2)
+  plot_xlab <- paste("PC1 (",pc1_weight,"%)",sep="")
+  plot_ylab <- paste("PC2 (",pc2_weight,"%)",sep="")
+  
+  image <- ggplot(pca$x, aes(x=PC1, y=PC2, color=as.factor(cluster_labels))) +
+    geom_point(size=2) +
+    scale_color_manual(values=cbPalette) +
+    xlab(plot_xlab) +
+    ylab(plot_ylab) +
+    labs(color="Cluster") +
+    theme(axis.line = element_line(linewidth = 1, color = "black"), 
+          axis.ticks = element_line(linewidth = 1, color="black"),
+          panel.background = element_rect("white"),
+          plot.background = element_rect("white"),
+          axis.title = element_text(size=28),
+          axis.text = element_text(size=24),
+          legend.title = element_text(size=18),
+          legend.text = element_text(size=14))
+  image
 
   # Heatmap
+  ha_df <- data.frame(Cluster=cluster_labels)
+  
+  # Create an annotation object for the columns
+  column_annotation <- HeatmapAnnotation(df = ha_df, 
+                                         col=list(Cluster=c("1"=unname(cbPalette[1]),"2"=unname(cbPalette[2]),
+                                                            "3"=unname(cbPalette[3]),"4"=unname(cbPalette[4]))))
+  # Create the heatmap with annotation
+  image <- Heatmap(as.matrix(t(expr_mat_norm)), 
+                   name = "Expression", 
+                   top_annotation = column_annotation,
+                   row_names_gp=gpar(fontsize=12),
+                   clustering_method_columns = "ward.D2",
+                   show_column_names = F)
+  image
+  
+
 }
 
 
