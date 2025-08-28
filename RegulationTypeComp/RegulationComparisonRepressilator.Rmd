@@ -1,0 +1,160 @@
+---
+title: "Regulation Comparison of Repressilator"
+author: "Aidan Tillman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(sRACIPE)
+library(ggplot2)
+```
+
+## Introduction
+
+```{r message=FALSE, warning=FALSE,}
+repressilator_tf <- read.table(file.path("../topos",paste0("repressilator_tf",".tpo")), header=T)
+repressilator_pd <- read.table(file.path("../topos",paste0("repressilator_pd",".tpo")), header=T)
+```
+
+
+```{r message=TRUE, warning=TRUE, results='hide'}
+repTFSet <- sracipeSimulate(circuit = repressilator_tf, numModels = 1000, nIC = 5,
+                            limitcycles = TRUE, numConvergenceIter = 20, 
+                            integrateStepSize = 0.02, maxLCs = 2)
+repPDSet <- sracipeSimulate(circuit = repressilator_pd, numModels = 1000, nIC = 5,
+                            limitcycles = TRUE, numConvergenceIter = 20, 
+                            integrateStepSize = 0.02, maxLCs = 2)
+```
+
+
+## Comparison of State distributions
+
+```{r}
+rep_tf_SS <- sracipeUniqueStates(repTFSet)
+rep_pd_SS <- sracipeUniqueStates(repPDSet)
+```
+
+
+```{r}
+rep_tf_SS <- Filter(function(x) nrow(x) > 0 && ncol(x) > 0, rep_tf_SS)
+rep_tf_SS <- t(do.call(cbind, rep_tf_SS))
+
+rep_pd_SS <- Filter(function(x) nrow(x) > 0 && ncol(x) > 0, rep_pd_SS)
+rep_pd_SS <- t(do.call(cbind, rep_pd_SS))
+```
+
+
+```{r}
+tmpMeans <- rowMeans(t(log2(1+rep_tf_SS)))
+tmpSds <- apply(t(log2(1+rep_tf_SS)),1,sd)
+tf_SS_norm <- log2(1+rep_tf_SS)
+tf_SS_norm <- sweep(tf_SS_norm, 2, tmpMeans, FUN = "-") # scale
+tf_SS_norm <- sweep(tf_SS_norm, 2, tmpSds, FUN = "/") # scale
+
+pd_SS_norm <- log2(1+rep_pd_SS) # Log transform
+pd_SS_norm <- sweep(pd_SS_norm, 2, tmpMeans, FUN = "-") # scale
+pd_SS_norm <- sweep(pd_SS_norm, 2, tmpSds, FUN = "/") # scale
+```
+
+
+```{r}
+pca_tf <- prcomp(tf_SS_norm)
+pca_pd <- scale(pd_SS_norm, pca_tf$center, pca_tf$scale) %*% pca_tf$rotation
+```
+
+```{r}
+k_use <- 3
+dist_mat_tf <- dist(pca_tf$x)
+hc_tf <- hclust(dist_mat_tf, method = "ward.D2")
+cluster_labels_tf <- cutree(hc_tf, k = k_use)
+
+dist_mat_pd <- dist(pca_pd)
+hc_pd <- hclust(dist_mat_pd, method = "ward.D2")
+cluster_labels_pd <- cutree(hc_pd, k = k_use)
+
+```
+
+```{r echo=FALSE}
+pc1_weight <- round(100*summary(pca_tf)$importance[2,1],2)
+pc2_weight <- round(100*summary(pca_tf)$importance[2,2],2)
+plot_xlab <- paste("PC1 (",pc1_weight,"%)",sep="")
+plot_ylab <- paste("PC2 (",pc2_weight,"%)",sep="")
+
+image_tf <- ggplot(pca_tf$x, aes(x=PC1, y=PC2, color=as.factor(cluster_labels_tf))) +
+  geom_point(size=2) +
+  scale_color_manual(values=c("blue", "red", "green")) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  labs(color="Cluster") + 
+  ggtitle("Repressilator TF") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14),
+        plot.title = element_text(size = 22, hjust = 0.5))
+image_tf
+
+
+image_pd <- ggplot(pca_pd, aes(x=PC1, y=PC2, color=as.factor(cluster_labels_pd))) +
+  geom_point(size=2) +
+  scale_color_manual(values=c("red", "green", "blue")) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  labs(color="Cluster") + 
+  ggtitle("Repressilator PD") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14),
+        plot.title = element_text(size = 22, hjust = 0.5))
+image_pd
+```
+
+
+## Comparison of Limit Cycle Properties
+
+```{r}
+repTFLCcount <- repTFSet@metadata[["totalNumofLCs"]]
+repPDLCcount <- repPDSet@metadata[["totalNumofLCs"]]
+
+repTFLCs <- repTFSet@metadata[["LCData"]]
+repPDLCs <- repPDSet@metadata[["LCData"]]
+```
+
+
+```{r}
+
+repTFMeanPeriod <- mean(unique(repTFLCs$Period))*0.02
+repPDMeanPeriod <- mean(unique(repPDLCs$Period))*0.02
+
+repTFSTDPeriod <- sd(unique(repTFLCs$Period))*0.02
+repPDSTDPeriod <- sd(unique(repPDLCs$Period))*0.02
+
+stats_rep <- data.frame(
+  group = c("TF", "PD"),
+  mean  = c(repTFMeanPeriod, repPDMeanPeriod),
+  sd    = c(repTFSTDPeriod, repPDSTDPeriod)
+)
+
+ggplot(stats_rep, aes(x = group, y = mean)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.2) +
+  ylab("Unit Time") +
+  theme_minimal()
+
+```
+
+
