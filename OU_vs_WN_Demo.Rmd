@@ -1,0 +1,419 @@
+---
+title: "OU_vs_WN_Demo"
+author: "Dan Ramirez"
+date: "2025-08-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup
+
+```{r sim_setup, echo = T, results = 'hide', warning=FALSE, message=FALSE}
+rm(list=ls())
+#remotes::install_github("lusystemsbio/sRACIPE")
+library(sRACIPE)                 # GRN simulation
+library(ggplot2)                 # plotting
+library(microbenchmark)          # time cost benchmarking
+library(dplyr)                   # data management
+library(tidyr)                   # data management
+library(ComplexHeatmap)          # plotting
+# seed for reproducibility & color palette for plots
+set.seed(1234)
+cbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")[c(3,2,4:8)]
+
+nModels <- 1000
+nICs <- 100
+n_places_rounded <- 4
+
+topo_name <- "toggleSwitch"
+
+topoDir <- file.path(getwd(),topo_name)
+plotDir <- file.path(topoDir,"plots")
+dataDir <- file.path(topoDir,"data")
+
+if(!dir.exists(topoDir)) {
+  dir.create(topoDir)
+}
+if(!dir.exists(dataDir)) {
+  dir.create(dataDir)
+}
+if(!dir.exists(plotDir)) {
+  dir.create(plotDir)
+}
+
+topo <- read.table(file.path("topos",paste0(topo_name,".tpo")), header=T)
+
+
+```
+
+## Initial Simulation, PCA & Clustering
+
+```{r initial_sims}
+
+racipe_fname <- file.path(dataDir,"racipe.Rds")
+if(!file.exists(racipe_fname)) {
+  racipe <- sracipeSimulate(topo, numModels = nModels, nIC = nICs)
+  saveRDS(racipe, racipe_fname)
+} else {
+  racipe <- readRDS(racipe_fname)
+}
+
+## GET UNIQUE STEADY STATES
+ss_unique_fname <- file.path(dataDir,"ss_unique.Rds")
+racipe_summary_fname <- file.path(dataDir,"racipe_summary.Rds")
+if(!file.exists(ss_unique_fname)) {
+  states <- round(as.data.frame(t(assay(racipe))), n_places_rounded)
+  states$Model <- rep(1:nModels, each=nICs)
+  ss_unique <- states %>%
+    group_by(Model) %>%
+    distinct(across(-Model), .keep_all = TRUE) %>%
+    mutate(State = row_number()) %>%
+    ungroup()
+
+  racipe_summary_df <- ss_unique %>%
+    group_by(Model) %>%
+    summarise(NumStates = n(), .groups = "drop")
+
+  saveRDS(ss_unique, ss_unique_fname)
+  saveRDS(racipe_summary_df, racipe_summary_fname)
+} else {
+  ss_unique <- readRDS(ss_unique_fname)
+  racipe_summary_df <- readRDS(racipe_summary_fname)
+}
+
+genes <- rownames(racipe)
+expr_mat <- ss_unique[,genes]
+tmpMeans <- rowMeans(t(log2(1+expr_mat)))
+tmpSds <- apply(t(log2(1+expr_mat)),1,sd)
+expr_mat_norm <- log2(1+expr_mat)
+expr_mat_norm[,genes] <- sweep(expr_mat_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+expr_mat_norm[,genes] <- sweep(expr_mat_norm[,genes], 2, tmpSds, FUN = "/") # scale
+
+## PCA
+pca_fname <- file.path(dataDir,"pca.Rds")
+if(!file.exists(pca_fname)) {
+
+  pca <- prcomp(expr_mat_norm[,genes])
+
+  saveRDS(pca, pca_fname)
+} else {
+  pca <- readRDS(pca_fname)
+}
+
+## CLUSTERING
+clust_fname <- file.path(dataDir,"cluster_labels.Rds")
+if(!file.exists(clust_fname)) {
+  k_use <- k_list[topo_name]
+  pca_data <- pca$x
+  dist_mat <- dist(pca_data)
+  hc <- hclust(dist_mat, method = "ward.D2")
+  cluster_labels <- cutree(hc, k = k_use)
+  saveRDS(cluster_labels, clust_fname)
+} else {
+  cluster_labels <- readRDS(clust_fname)
+}
+
+## Identify bistable models
+ss_unique$Cluster <- cluster_labels
+ss_unique <- as.data.frame(ss_unique)
+racipe_summary_df$Stability <- NA
+for(model in racipe_summary_df$Model) {
+  numModelClusters <- length(unique(ss_unique[which(ss_unique$Model == model),"Cluster"]))
+  if(numModelClusters == 2) {
+    racipe_summary_df[which(racipe_summary_df$Model == model), "Stability"] <- "Bistable"
+  }
+}
+bistable_models <- which(racipe_summary_df$Stability == "Bistable" & racipe_summary_df$NumStates == 2)
+
+keepIdx <- c()
+for(model in bistable_models) {
+  # add steady states for cluster 1 and 2
+  addIdx <- which(ss_unique$Model == model)
+  keepIdx <- c(keepIdx, addIdx)
+  
+}
+clamp_df <- pivot_longer(ss_unique[keepIdx,], cols = all_of(genes),
+                         names_to = "Gene", values_to = "Expression")
+clamp_df$ModelIndex <- as.numeric(factor(clamp_df$Model))
+
+# set up racipe object with params & ICs from bistable models (paired initialization)
+racipe_bistable <- sracipeSimulate(topo, numModels = (2*length(bistable_models)), nIC = 1,
+                                   genIC = T, genParams = T, integrate = F)
+sracipeIC(racipe_bistable) <- t(ss_unique[keepIdx,genes])
+sracipeParams(racipe_bistable) <- sracipeParams(racipe)[rep(bistable_models, each=2),]
+
+
+
+```
+
+## PCA plot of simulated steady states
+
+```{r eda_plots, echo=TRUE}
+## PLOTS
+# PCA
+pc1_weight <- round(100*summary(pca)$importance[2,1],2)
+pc2_weight <- round(100*summary(pca)$importance[2,2],2)
+plot_xlab <- paste("PC1 (",pc1_weight,"%)",sep="")
+plot_ylab <- paste("PC2 (",pc2_weight,"%)",sep="")
+
+ggplot(pca$x, aes(x=PC1, y=PC2, color=as.factor(cluster_labels))) +
+  geom_point(size=2) +
+  scale_color_manual(values=cbPalette) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  labs(color="Cluster") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14))
+
+
+# Heatmap
+ha_df <- data.frame(Cluster=cluster_labels)
+
+# Create an annotation object for the columns
+column_annotation <- HeatmapAnnotation(df = ha_df, 
+                                       col=list(Cluster=c("1"=unname(cbPalette[1]),"2"=unname(cbPalette[2]),
+                                                          "3"=unname(cbPalette[3]),"4"=unname(cbPalette[4]))))
+# Create the heatmap with annotation
+image <- Heatmap(as.matrix(t(expr_mat_norm)), 
+                 name = "Expression", 
+                 top_annotation = column_annotation,
+                 row_names_gp=gpar(fontsize=12),
+                 clustering_method_columns = "ward.D2",
+                 show_column_names = F)
+image
+  
+
+```
+
+
+## OU vs White noise - ensemble differences
+
+```{r ou_vs_wn_ensemble}
+
+wn_noise <- 0.1
+ou_noise <- 0.1
+ou_tau   <- 10
+
+racipe_wn_ensemble <- sracipeSimulate(racipe_bistable, integrate=T, genIC = F, genParams = F,
+                                      simulationTime = 100, initialNoise = 0.2, nNoise = 1,
+                                      simDet = F, integrateStepSize = 0.2, stepper = "EM")
+
+racipe_ou_ensemble <- sracipeSimulate(racipe_bistable, integrate=T, genIC = F, genParams = F,
+                                      simulationTime = 100, initialNoise = 0.04, nNoise = 1,
+                                      simDet = F, ouNoise_t = 10, integrateStepSize = 0.2, stepper = "EM")
+
+ou_ensemble_raw <- as.data.frame(t(assay(racipe_ou_ensemble)))
+ou_ensemble_norm <- log2(1+ou_ensemble_raw)
+ou_ensemble_norm[,genes] <- sweep(ou_ensemble_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+ou_ensemble_norm[,genes] <- sweep(ou_ensemble_norm[,genes], 2, tmpSds, FUN = "/") # scale
+ou_ensemble_pca <- as.data.frame(as.matrix(ou_ensemble_norm[, c(1, 2)]) %*% pca$rotation)
+ou_ensemble_pca$Type <- paste0("OU (tau=",ou_tau,")")
+
+wn_ensemble_raw <- as.data.frame(t(assay(racipe_wn_ensemble)))
+wn_ensemble_norm <- log2(1+wn_ensemble_raw)
+wn_ensemble_norm[,genes] <- sweep(wn_ensemble_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+wn_ensemble_norm[,genes] <- sweep(wn_ensemble_norm[,genes], 2, tmpSds, FUN = "/") # scale
+wn_ensemble_pca <- as.data.frame(as.matrix(wn_ensemble_norm[, c(1, 2)]) %*% pca$rotation)
+wn_ensemble_pca$Type <- "White"
+
+traj_ensemble_combined_norm <- rbind(ou_ensemble_norm, wn_ensemble_norm)
+traj_ensemble_combined_norm$Type <- c(rep(paste0("OU (tau=",ou_tau,")"), nrow(ou_ensemble_raw)), rep("White", nrow(wn_ensemble_raw)))
+traj_ensemble_combined <- rbind(ou_ensemble_pca, wn_ensemble_pca)
+
+
+
+
+
+```
+
+### Ensemble plots
+
+Looking at the ensemble of bistable models, we see little obvious distinctions between the distribution of states in a snapshot from an ensemble simulation with OU compared to white noise.
+
+```{r ou_vs_wn_ensemble_plots}
+
+ggplot(traj_ensemble_combined_norm, aes(x=A, y=B, color = Type)) +
+  geom_point(alpha = 0.6, size=3) +
+  labs(x = "A", y = "B", color="Type") +
+  theme_minimal() +
+  theme(axis.text = element_text(size=24),
+        axis.title = element_text(size=28),)
+
+
+ggplot(traj_ensemble_combined,aes(x=PC1, y=PC2, color=Type)) +
+  geom_point(alpha=0.6, size=3) +
+  labs(x = "PC1", y = "PC2", color="Type") +
+  theme_minimal() +
+  theme(axis.text = element_text(size=24),
+        axis.title = element_text(size=28),)
+
+
+```
+
+## OU vs White noise - individual model
+
+Next, we will investigate the effect that the noise type has on transition behavior for an individual model. We will manually construct a symmetric toggle switch model with parameter such that each state is equally favored, then evaluate whether changing the noise type influences the dynamics of the model.
+
+
+### Helper functions
+
+Firstly, we will define some helper functions. 
+```{r ou_vs_white_helpers}
+q_of <- function(df) df$A - df$B
+
+sum_to_q <- function(sum_x, q) {
+  x1 <- 0.5 * (sum_x + q); x2 <- 0.5 * (sum_x - q)
+  c(A = max(x1, 0), B = max(x2, 0))
+}
+
+# naive dividing value 
+make_thresholds <- function(P1, P2, frac = 0.10, max_frac = 0.30) {
+  q1 <- P1["A"] - P1["B"]; q2 <- P2["A"] - P2["B"]
+  q_mid <- 0.5 * (q1 + q2)
+  dQ <- abs(q2 - q1)
+  delta <- min(frac * dQ, max_frac * dQ) # 10% of separation, capped
+  list(q_lo = q_mid - delta, q_hi = q_mid + delta,
+       q_mid = q_mid, dQ = dQ, q1 = q1, q2 = q2)
+}
+
+# count switches with tiny debounce & hysteresis
+count_switches <- function(q, q_lo, q_hi, min_stay_steps = 3) {
+  # states: -1 (P1 core), +1 (P2 core), 0 (middle)
+  state <- ifelse(q <= q_lo, -1L, ifelse(q >= q_hi, +1L, 0L))
+  n <- length(state)
+  
+  # compress consecutive runs
+  runs <- rle(state)
+  # keep only core runs with enough stay
+  core_idx <- which(runs$values != 0 & runs$lengths >= min_stay_steps)
+  
+  if (length(core_idx) <= 1) {
+    return(list(n_switch = 0L, switch_indices = integer(0)))
+  }
+  
+  core_states <- runs$values[core_idx]
+  # switches are sign changes between consecutive qualifying core runs
+  n_switch <- sum(core_states[-1] != core_states[-length(core_states)])
+  # approximate indices where each qualifying run starts
+  run_starts <- cumsum(c(1L, runs$lengths[-length(runs$lengths)]))
+  switch_pos <- run_starts[core_idx[-1]]
+  
+  list(n_switch = as.integer(n_switch), switch_indices = switch_pos)
+}
+
+# build correct time vector from printStart/printInterval
+make_time <- function(n_rows, print_start, print_interval) {
+  seq(from = print_start, by = print_interval, length.out = n_rows)
+}
+
+# simple “runner” wrappers that return A,B dataframe for a given sim_time
+make_white_runner <- function(initialNoise, topo, params_use, ic_use, h,
+                              print_start, print_interval) {
+  function(sim_time = 200) {
+    r <- sracipeSimulate(topo, integrate = FALSE, numModels = 1, nIC = 1,
+                         timeSeries = TRUE, simulationTime = sim_time,
+                         genIC = TRUE, genParams = TRUE,
+                         printStart = print_start, printInterval = print_interval,
+                         integrateStepSize = h, nNoise = 1,
+                         initialNoise = initialNoise, simDet = FALSE, scaledNoise = T)
+    sracipeIC(r) <- ic_use
+    sracipeParams(r) <- t(params_use)
+    r <- sracipeSimulate(r, integrate = TRUE, genIC = FALSE, genParams = FALSE,
+                         simulationTime = sim_time, timeSeries = TRUE,
+                         nNoise = 1, initialNoise = initialNoise, simDet = FALSE,
+                         printStart = print_start, printInterval = print_interval,
+                         integrateStepSize = h, scaledNoise = T)
+    df <- as.data.frame(t(r@metadata$timeSeries))[, c("A","B")]
+    for (j in seq_len(ncol(df))) df[, j] <- as.numeric(df[, j])
+    df
+  }
+}
+
+make_ou_runner <- function(initialNoise, tau, topo, params_use, ic_use, h,
+                           print_start, print_interval) {
+  function(sim_time = 200) {
+    r <- sracipeSimulate(topo, integrate = FALSE, numModels = 1, nIC = 1,
+                         timeSeries = TRUE, simulationTime = sim_time,
+                         genIC = TRUE, genParams = TRUE,
+                         printStart = print_start, printInterval = print_interval,
+                         integrateStepSize = h, nNoise = 1,
+                         initialNoise = initialNoise, ouNoise_t = tau,
+                         simDet = FALSE, stepper = "EM_OU", scaledNoise = T)
+    sracipeIC(r) <- ic_use
+    sracipeParams(r) <- t(params_use)
+    r <- sracipeSimulate(r, integrate = TRUE, genIC = FALSE, genParams = FALSE,
+                         simulationTime = sim_time, timeSeries = TRUE,
+                         nNoise = 1, initialNoise = initialNoise, simDet = FALSE,
+                         printStart = print_start, printInterval = print_interval,
+                         integrateStepSize = h, ouNoise_t = tau, stepper = "EM_OU", scaledNoise = T)
+    df <- as.data.frame(t(r@metadata$timeSeries))[, c("A","B")]
+    for (j in seq_len(ncol(df))) df[, j] <- as.numeric(df[, j])
+    df
+  }
+}
+
+```
+
+
+### Setup
+
+First, we will run a simulation with multiple random ICs to identify the steady states of the selected model.
+```{r wn_vs_ou_get_states}
+long_sim_one_model_time <- 500
+params_use <- c(70, 70, 0.2, 0.2, 5, 5, 3, 3, 80, 80)
+
+racipe_wn_test <- sracipeSimulate(topo, integrate = F, numModels = 1, nIC = 100,
+                                  genIC = T, genParams = T, integrateStepSize = 0.2,
+                                  nNoise = 0, initialNoise = 0)
+sracipeParams(racipe_wn_test) <- t(params_use)
+racipe_wn_test <- sracipeSimulate(racipe_wn_test, integrate=T, numModels = 100, nIC = 1, genParams = F)
+model_states <- distinct(as.data.frame(t(assay(racipe_wn_test))))
+model_states$Cluster <- NA
+model_states[which(model_states$A > model_states$B),"Cluster"] <- 1
+model_states[which(model_states$B > model_states$A),"Cluster"] <- 2
+```
+
+Now we will define some parameters of the simulation
+
+```{r wn_vs_ou_sim_setup}
+genes          <- c("A","B")
+sim_time_long  <- 5000
+h              <- 0.2               
+print_start    <- 1
+print_interval <- 1
+
+wn_noise <- 0.40                    
+ou_noise <- 0.08                    
+ou_tau   <- 20                      
+
+
+# Define basins
+P1 <- as.vector(unlist(model_states[2,c("A","B")]))
+P2 <- as.vector(unlist(model_states[1,c("A","B")]))
+names(P1) <- genes
+names(P2) <- genes
+
+# Start from basin 1
+ic_use     <- t(P1)                 
+colnames(ic_use) <- genes
+
+```
+
+
+
+### Simulations
+
+
+### Plots
+
+
+
