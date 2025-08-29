@@ -12,6 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r message=FALSE, warning=FALSE}
 library(sRACIPE)
 library(ggplot2)
+library(ComplexHeatmap)
 ```
 
 ## Introduction
@@ -154,6 +155,27 @@ ggplot(stats_rep, aes(x = group, y = mean)) +
   geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.2) +
   ylab("Unit Time") +
   theme_minimal()
+
+```
+
+```{r}
+# Heatmap
+image <- Heatmap(as.matrix(t(tf_SS_norm)), 
+                 name = "Expression (TF)", 
+                 row_names_gp=gpar(fontsize=12),
+                 clustering_method_columns = "ward.D2",
+                 show_column_names = F)
+image
+
+
+
+image <- Heatmap(as.matrix(t(pd_SS_norm)), 
+                 name = "Expression (PD)",
+                 row_names_gp=gpar(fontsize=12),
+                 clustering_method_columns = "ward.D2",
+                 show_column_names = F)
+image
+  
 
 ```
 
