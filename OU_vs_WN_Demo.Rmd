@@ -11,6 +11,8 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Setup
 
+First, we will import necessary libraries, define some helpful variables and create the directory structure for outputs.
+
 ```{r sim_setup, echo = T, results = 'hide', warning=FALSE, message=FALSE}
 rm(list=ls())
 #remotes::install_github("lusystemsbio/sRACIPE")
@@ -20,6 +22,9 @@ library(microbenchmark)          # time cost benchmarking
 library(dplyr)                   # data management
 library(tidyr)                   # data management
 library(ComplexHeatmap)          # plotting
+library(cowplot)                 # plotting
+library(grid)                    # for unit()
+library(gt)                      # for table display
 # seed for reproducibility & color palette for plots
 set.seed(1234)
 cbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")[c(3,2,4:8)]
@@ -50,6 +55,8 @@ topo <- read.table(file.path("topos",paste0(topo_name,".tpo")), header=T)
 ```
 
 ## Initial Simulation, PCA & Clustering
+
+To prepare for stochastic simulations, we will first simulate a toggle switch circuit and perform PCA and clustering on the unique steady states.
 
 ```{r initial_sims}
 
@@ -197,19 +204,20 @@ image
 
 ## OU vs White noise - ensemble differences
 
-```{r ou_vs_wn_ensemble}
+Now, we will simulate an ensemble of bistable models (i.e., models with 2 stable states, one in each cluster) during a period of OU and white noise. We will examine the number of transitions observed after a given time period, as well as the distribution of gene expression values during a stochastic simulation.
 
-wn_noise <- 0.1
-ou_noise <- 0.1
+```{r ou_vs_wn_ensemble}
+wn_noise <- 0.2
+ou_noise <- 0.2
 ou_tau   <- 10
 
 racipe_wn_ensemble <- sracipeSimulate(racipe_bistable, integrate=T, genIC = F, genParams = F,
-                                      simulationTime = 100, initialNoise = 0.2, nNoise = 1,
-                                      simDet = F, integrateStepSize = 0.2, stepper = "EM")
+                                      simulationTime = 100, initialNoise = wn_noise, nNoise = 1,
+                                      simDet = F, integrateStepSize = 0.2, stepper = "EM", scaledNoise = T)
 
 racipe_ou_ensemble <- sracipeSimulate(racipe_bistable, integrate=T, genIC = F, genParams = F,
-                                      simulationTime = 100, initialNoise = 0.04, nNoise = 1,
-                                      simDet = F, ouNoise_t = 10, integrateStepSize = 0.2, stepper = "EM")
+                                      simulationTime = 100, initialNoise = ou_noise, nNoise = 1,
+                                      simDet = F, ouNoise_t = 10, integrateStepSize = 0.2, stepper = "EM_OU", scaledNoise = T)
 
 ou_ensemble_raw <- as.data.frame(t(assay(racipe_ou_ensemble)))
 ou_ensemble_norm <- log2(1+ou_ensemble_raw)
@@ -231,13 +239,108 @@ traj_ensemble_combined <- rbind(ou_ensemble_pca, wn_ensemble_pca)
 
 
 
+```
+```{r ou_vs_wn_ensemble_relax}
+
+# Secondary relaxation simulation to check which basins the models ended up closest to
+
+racipe_wn_ensemble_relax <- racipe_wn_ensemble
+sracipeIC(racipe_wn_ensemble_relax) <- assay(racipe_wn_ensemble)
+racipe_wn_ensemble_relax <- sracipeSimulate(racipe_wn_ensemble_relax, integrate=T, 
+                                          genIC = F, genParams = F,
+                                          simulationTime = 100,
+                                          initialNoise = 0, nNoise = 0, simDet = T, stepper="EM")
+wn_ensemble_relaxed_raw <- as.data.frame(t(assay(racipe_wn_ensemble_relax)))
+
+
+racipe_ou_ensemble_relax <- racipe_ou_ensemble
+sracipeIC(racipe_ou_ensemble_relax) <- assay(racipe_ou_ensemble)
+racipe_ou_ensemble_relax <- sracipeSimulate(racipe_ou_ensemble_relax, integrate=T, 
+                                          genIC = F, genParams = F,
+                                          simulationTime = 100,
+                                          initialNoise = 0, nNoise = 0, simDet = T, stepper="EM")
+ou_ensemble_relaxed_raw <- as.data.frame(t(assay(racipe_ou_ensemble_relax)))
+
+
+```
+### Transition counts
+
+Taking the results of our relaxation simulations, we can show that more models undergo transitions under OU noise than white noise for the provided noise levels. The ensemble as a whole is roughly symmetric, with approximately equal occurrences of transitions in either direction. 
+
+```{r ou_vs_wn_ensemble_analysis}
+
+## Calculate how many models ended the simulation period in a different state than they began in
+
+
+noise_transition_summary <- data.frame(Model=rep(bistable_models, each=2),
+                                       Init_Clust=cluster_labels[keepIdx],
+                                       Final_Clust_OU=NA,
+                                       Final_Clust_WN=NA,
+                                       Transition_OU="None",
+                                       Transition_WN="None")
+
+## WN case
+for(i in 1:nrow(wn_ensemble_relaxed_raw)) {
+  model <- bistable_models[round((i+0.1) / 2)]
+  model_states <- ss_unique[which(ss_unique$Model == model),]
+  
+  final_state <- wn_ensemble_relaxed_raw[c(i, i),]
+  diffs = final_state - model_states[,genes]
+  diffs$Cluster <- model_states$Cluster
+  diff_sums <- rowSums(diffs[,genes])
+  names(diff_sums) <- model_states$Cluster
+  
+  if(abs(diff_sums[which(names(diff_sums) == 1)]) < 1e-4) {
+    noise_transition_summary[i,"Final_Clust_WN"] <- 1
+  } else if(abs(diff_sums[which(names(diff_sums) == 2)]) < 1e-4) {
+    noise_transition_summary[i,"Final_Clust_WN"] <- 2
+  } else {
+    noise_transition_summary[i,"Final_Clust_WN"] <- "New"
+  }
+    
+}
+noise_transition_summary[which(noise_transition_summary$Init_Clust == 1 &
+                                        noise_transition_summary$Final_Clust_WN == 2   ),"Transition_WN"] <- "1-->2"
+noise_transition_summary[which(noise_transition_summary$Init_Clust == 2 &
+                                           noise_transition_summary$Final_Clust_WN == 1   ),"Transition_WN"] <- "2-->1"
+
+## OU case
+for(i in 1:nrow(ou_ensemble_relaxed_raw)) {
+  model <- bistable_models[round((i+0.1) / 2)]
+  model_states <- ss_unique[which(ss_unique$Model == model),]
+  
+  final_state <- ou_ensemble_relaxed_raw[c(i, i),]
+  diffs = final_state - model_states[,genes]
+  diffs$Cluster <- model_states$Cluster
+  diff_sums <- rowSums(diffs[,genes])
+  names(diff_sums) <- model_states$Cluster
+  
+  if(abs(diff_sums[which(names(diff_sums) == 1)]) < 1e-4) {
+    noise_transition_summary[i,"Final_Clust_OU"] <- 1
+  } else if(abs(diff_sums[which(names(diff_sums) == 2)]) < 1e-4) {
+    noise_transition_summary[i,"Final_Clust_OU"] <- 2
+  } else {
+    noise_transition_summary[i,"Final_Clust_OU"] <- "New"
+  }
+    
+}
+noise_transition_summary[which(noise_transition_summary$Init_Clust == 1 &
+                                        noise_transition_summary$Final_Clust_OU == 2   ),"Transition_OU"] <- "1-->2"
+noise_transition_summary[which(noise_transition_summary$Init_Clust == 2 &
+                                           noise_transition_summary$Final_Clust_OU == 1   ),"Transition_OU"] <- "2-->1"
+
+
+print("White noise transition counts:")
+print(table(noise_transition_summary$Transition_WN))
+print("OU noise transition counts:")
+print(table(noise_transition_summary$Transition_OU))
 
 
 ```
 
 ### Ensemble plots
 
-Looking at the ensemble of bistable models, we see little obvious distinctions between the distribution of states in a snapshot from an ensemble simulation with OU compared to white noise.
+Looking at the ensemble of bistable models, however, we see little obvious distinctions between the distribution of states in a snapshot from an ensemble simulation with OU compared to white noise.
 
 ```{r ou_vs_wn_ensemble_plots}
 
@@ -266,18 +369,21 @@ Next, we will investigate the effect that the noise type has on transition behav
 
 ### Helper functions
 
-Firstly, we will define some helper functions. 
+Firstly, we will define some helper functions:
+
 ```{r ou_vs_white_helpers}
 q_of <- function(df) df$A - df$B
 
 sum_to_q <- function(sum_x, q) {
-  x1 <- 0.5 * (sum_x + q); x2 <- 0.5 * (sum_x - q)
+  x1 <- 0.5 * (sum_x + q)
+  x2 <- 0.5 * (sum_x - q)
   c(A = max(x1, 0), B = max(x2, 0))
 }
 
 # naive dividing value 
 make_thresholds <- function(P1, P2, frac = 0.10, max_frac = 0.30) {
-  q1 <- P1["A"] - P1["B"]; q2 <- P2["A"] - P2["B"]
+  q1 <- P1["A"] - P1["B"]
+  q2 <- P2["A"] - P2["B"]
   q_mid <- 0.5 * (q1 + q2)
   dQ <- abs(q2 - q1)
   delta <- min(frac * dQ, max_frac * dQ) # 10% of separation, capped
@@ -361,13 +467,49 @@ make_ou_runner <- function(initialNoise, tau, topo, params_use, ic_use, h,
   }
 }
 
+# compute dwell times (time spent in each state)
+compute_dwells <- function(t, q, q_lo, q_hi, min_stay_steps = 1) {
+  # States: A if q>hi, B if q<lo, NA otherwise
+  st <- ifelse(q > q_hi, "A", ifelse(q < q_lo, "B", NA))
+  n  <- length(st)
+  if (n == 0 || all(is.na(st))) {
+    return(list(mean_overall = NA_real_, mean_A = NA_real_, mean_B = NA_real_, n_episodes = 0))
+  }
+  episodes <- list()
+  i <- 1
+  while (i <= n) {
+    if (is.na(st[i])) { i <- i + 1; next }
+    cur_state <- st[i]
+    j <- i
+    while (j + 1 <= n && !is.na(st[j + 1]) && st[j + 1] == cur_state) j <- j + 1
+    # episode length in steps
+    ep_len_steps <- j - i + 1
+    if (ep_len_steps >= min_stay_steps) {
+      # episode duration using time axis
+      dur <- t[j] - t[i]
+      episodes[[length(episodes) + 1]] <- list(state = cur_state, duration = dur)
+    }
+    i <- j + 1
+  }
+  if (length(episodes) == 0) {
+    return(list(mean_overall = NA_real_, mean_A = NA_real_, mean_B = NA_real_, n_episodes = 0))
+  }
+  durs <- vapply(episodes, function(e) e$duration, numeric(1))
+  states <- vapply(episodes, function(e) e$state, character(1))
+  mean_A <- if (any(states == "A")) mean(durs[states == "A"]) else NA_real_
+  mean_B <- if (any(states == "B")) mean(durs[states == "B"]) else NA_real_
+  list(mean_overall = mean(durs), mean_A = mean_A, mean_B = mean_B,
+       n_episodes = length(episodes))
+}
+
 ```
 
 
 ### Setup
 
-First, we will run a simulation with multiple random ICs to identify the steady states of the selected model.
-```{r wn_vs_ou_get_states}
+First, we will run a simulation with multiple random ICs to identify the steady states of the selected model. Simulations will begin in state 1 and we will count "runs" where the model remains in one basin (defined as any point beyond a threshold 10% of the distance between steady states away from the midpoint, i.e. where the distance from one states is less than 40% of the total distance between states). Transitions will be counted as the number of switches between such runs. 
+
+```{r wn_vs_ou_get_states, results = 'hide', warning=FALSE, message=FALSE}
 long_sim_one_model_time <- 500
 params_use <- c(70, 70, 0.2, 0.2, 5, 5, 3, 3, 80, 80)
 
@@ -382,7 +524,7 @@ model_states[which(model_states$A > model_states$B),"Cluster"] <- 1
 model_states[which(model_states$B > model_states$A),"Cluster"] <- 2
 ```
 
-Now we will define some parameters of the simulation
+Now we will define some parameters of the simulation:
 
 ```{r wn_vs_ou_sim_setup}
 genes          <- c("A","B")
@@ -402,6 +544,9 @@ P2 <- as.vector(unlist(model_states[1,c("A","B")]))
 names(P1) <- genes
 names(P2) <- genes
 
+# Set thresholds
+thr <- make_thresholds(P1, P2, frac = 0.10)
+
 # Start from basin 1
 ic_use     <- t(P1)                 
 colnames(ic_use) <- genes
@@ -412,8 +557,390 @@ colnames(ic_use) <- genes
 
 ### Simulations
 
+We will simulate the model under two sets of conditions: 1) fixed tau, varying noise amplitude, and 2) fixed amplitude, varying tau. Then we will count transitions observed using the above framework.
 
-### Plots
+#### Fixed tau, varying amplitude
+
+```{r wn_vs_ou_sim_1, results = 'hide', warning=FALSE, message=FALSE}
+param_sets <- data.frame(WN_level=c(0.05, 0.1, 0.15),
+                         OU_level=c(0.05, 0.1, 0.15),
+                         OU_tau=c(10, 10, 10))
+
+pca_plots <- vector("list", nrow(param_sets))
+qt_plots  <- vector("list", nrow(param_sets))
+shared_legend <- NULL
+stats_rows <- list()
+
+for(pset in 1:nrow(param_sets)) {
+  wn_noise <- param_sets[pset,"WN_level"]
+  ou_noise <- param_sets[pset,"OU_level"]
+  ou_tau   <- param_sets[pset,"OU_tau"]
+  
+  # Run simulations
+  runner_white <- make_white_runner(wn_noise, topo, params_use, t(ic_use), h,
+                                    print_start, print_interval)
+  runner_ou    <- make_ou_runner(ou_noise, ou_tau, topo, params_use, t(ic_use), h,
+                                 print_start, print_interval)
+  # Get trajectories
+  trajW <- runner_white(sim_time_long)
+  trajO <- runner_ou(sim_time_long)
+  
+  # Count transitions & rates
+  qW <- q_of(trajW)
+  qO <- q_of(trajO)
+  tW <- make_time(nrow(trajW), print_start, print_interval)
+  tO <- make_time(nrow(trajO), print_start, print_interval)
+  swW <- count_switches(qW, thr$q_lo, thr$q_hi, min_stay_steps = 3)
+  swO <- count_switches(qO, thr$q_lo, thr$q_hi, min_stay_steps = 3)
+  rateW <- swW$n_switch / (tail(tW, 1) - head(tW, 1))
+  rateO <- swO$n_switch / (tail(tO, 1) - head(tO, 1))
+
+  # dwell-time summaries (overall mean across A/B episodes)
+  dwellW <- compute_dwells(tW, qW, thr$q_lo, thr$q_hi, min_stay_steps = 3)
+  dwellO <- compute_dwells(tO, qO, thr$q_lo, thr$q_hi, min_stay_steps = 3)
+
+  # Store transition stats per noise type
+  stats_rows[[length(stats_rows) + 1]] <- data.frame(
+    Amplitude = wn_noise, Type = "White",
+    Transitions = swW$n_switch,
+    Rate = rateW,
+    Dwell_mean = dwellW$mean_overall,
+    Dwell_mean_A = dwellW$mean_A,
+    Dwell_mean_B = dwellW$mean_B,
+    Episodes = dwellW$n_episodes,
+    Total_time = tail(tW, 1) - head(tW, 1),
+    Tau = NA_real_
+  )
+  
+  stats_rows[[length(stats_rows) + 1]] <- data.frame(
+    Amplitude = ou_noise, Type = paste0("OU (tau=", ou_tau, ")"),
+    Transitions = swO$n_switch,
+    Rate = rateO,
+    Dwell_mean = dwellO$mean_overall,
+    Dwell_mean_A = dwellO$mean_A,
+    Dwell_mean_B = dwellO$mean_B,
+    Episodes = dwellO$n_episodes,
+    Total_time = tail(tO, 1) - head(tO, 1),
+    Tau = ou_tau
+  )
+
+  # Prep data for plotting
+  dfW <- data.frame(t = tW, q = qW, type = "White")
+  dfO <- data.frame(t = tO, q = qO, type = paste0("OU (tau=", ou_tau, ")"))
+  both <- rbind(dfW, dfO)
+  
+  # q(t) plot
+  p_qt <- ggplot(both, aes(t, q, color = type)) +
+    geom_line(linewidth = 0.4, alpha = 0.9) +
+    geom_hline(yintercept = c(thr$q_lo, thr$q_hi), linetype = "dashed") +
+    labs(x = "Time", y = "q = A - B", color = "Type") +
+    theme_minimal() +
+    theme(axis.text = element_text(size=10, angle = 45),
+          axis.title = element_text(size=12),
+          plot.margin = margin(5, 10, 5, 5))
+  
+  # PCA prep
+  wn_traj_norm <- log2(1+trajW[which(trajW$A != 0 & trajW$B != 0),])
+  wn_traj_norm[,genes] <- sweep(wn_traj_norm[,genes], 2, tmpMeans, FUN = "-")
+  wn_traj_norm[,genes] <- sweep(wn_traj_norm[,genes], 2, tmpSds,   FUN = "/")
+  wn_traj_pca <- as.data.frame(as.matrix(wn_traj_norm[, c(1, 2)]) %*% pca$rotation)
+  colnames(wn_traj_pca)[1:2] <- c("PC1","PC2")
+  wn_traj_pca$Type <- "White"
+  
+  ou_traj_norm <- log2(1+trajO[which(trajO$A != 0 & trajO$B != 0),])
+  ou_traj_norm[,genes] <- sweep(ou_traj_norm[,genes], 2, tmpMeans, FUN = "-")
+  ou_traj_norm[,genes] <- sweep(ou_traj_norm[,genes], 2, tmpSds,   FUN = "/")
+  ou_traj_pca <- as.data.frame(as.matrix(ou_traj_norm[, c(1, 2)]) %*% pca$rotation)
+  colnames(ou_traj_pca)[1:2] <- c("PC1","PC2")
+  ou_traj_pca$Type <- paste0("OU (tau=",ou_tau,")")
+  
+  traj_pca_combined <- rbind(wn_traj_pca, ou_traj_pca)
+  
+  model_states_norm <- log2(1+model_states[,genes])
+  model_states_norm[,genes] <- sweep(model_states_norm[,genes], 2, tmpMeans, FUN = "-")
+  model_states_norm[,genes] <- sweep(model_states_norm[,genes], 2, tmpSds,   FUN = "/")
+  model_states_pca <- as.data.frame(as.matrix(model_states_norm[, c(1, 2)]) %*% pca$rotation)
+  colnames(model_states_pca) <- c("PC1","PC2")
+  
+  # PCA plot
+  p_pca <- ggplot(traj_pca_combined, aes(x=PC1, y=PC2, color=Type)) +
+    geom_point(alpha=0.15) +
+    geom_point(data=model_states_pca, aes(x=PC1, y=PC2), inherit.aes = FALSE,
+               size=1, color="red") +
+    labs(x = "PC1", y = "PC2", color="Type") +
+    theme_minimal() +
+    theme(axis.text = element_text(size=10),
+          axis.title = element_text(size=12),
+          plot.margin = margin(5, 10, 5, 5))
+  
+  # grab shared legend once (from first plot), then remove legends
+  if (pset == 1) {
+    shared_legend <- get_legend(
+      p_pca + theme(legend.position = "bottom",
+                    legend.key.height = unit(10, "pt"),
+                    legend.key.width  = unit(18, "pt"),
+                    legend.text = element_text(size=16),
+                    legend.title = element_text(size=18))
+    )
+  }
+  p_qt  <- p_qt  + theme(legend.position="none")
+  p_pca <- p_pca + theme(legend.position="none")
+  
+  pca_plots[[pset]] <- p_pca
+  qt_plots[[pset]]  <- p_qt
+}
+```
+
+
+```{r wn_vs_ou_sim_1_plots}
+# Column titles
+title_grobs <- lapply(seq_len(nrow(param_sets)), function(i) {
+  ggdraw() + draw_label(paste0("Amplitude = ", param_sets$WN_level[i]),
+                        fontface = "bold", size = 16, hjust = 0.5, vjust = 0.5)
+})
+titles_row <- plot_grid(plotlist = title_grobs, nrow = 1)
+
+# 2x3 grid and legend
+top_row    <- plot_grid(plotlist = pca_plots, nrow = 1, align = "hv")
+bottom_row <- plot_grid(plotlist = qt_plots,  nrow = 1, align = "hv")
+grid_2x3   <- plot_grid(top_row, bottom_row, ncol = 1, rel_heights = c(1, 1))
+
+final_plot <- plot_grid(titles_row, grid_2x3, shared_legend,
+                        ncol = 1, rel_heights = c(0.10, 1.00, 0.18),
+                        align = "hv", axis = "tblr")
+
+print(final_plot)
+
+# Display transition statistics
+stats_tbl <- dplyr::bind_rows(stats_rows) |>
+  arrange(Amplitude, match(Type, c("White", paste0("OU (tau=", unique(stats_rows[[2]]$Tau), ")")))) |>
+  mutate(
+    across(c(Rate, Dwell_mean, Dwell_mean_A, Dwell_mean_B), ~signif(., 3)),
+    Amplitude = sprintf("%.3g", Amplitude)
+  )
+
+gt(stats_tbl) |>
+  tab_header(
+    title = md("**Transition & Dwell Statistics by Noise Amplitude**"),
+    subtitle = "Per-simulation summaries for White vs OU noise"
+  ) |>
+  cols_label(
+    Amplitude = "Noise amplitude",
+    Type = "Noise type",
+    Transitions = "n transitions",
+    Rate = "rate (1/time)",
+    Dwell_mean = "mean dwell (time)",
+    Dwell_mean_A = "mean dwell A",
+    Dwell_mean_B = "mean dwell B",
+    Episodes = "n dwell episodes",
+    Total_time = "total simulated time",
+    Tau = "τ (OU)"
+  ) |>
+  sub_missing(columns = everything(), missing_text = "—") |>
+  tab_options(table.font.size = px(14)) |>
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(columns = c(Amplitude))
+  ) |>
+  tab_spanner(
+    label = "Dwell (by episode)",
+    columns = c(Dwell_mean, Dwell_mean_A, Dwell_mean_B)
+  )
+
+```
+
+
+#### Fixed amplitude, varying tau
+
+Now we will fix the amplitude at 0.15, and vary tau:
+
+```{r wn_vs_ou_sim_2, results = 'hide', warning=FALSE, message=FALSE}
+param_sets <- data.frame(WN_level=c(0.15, 0.15, 0.15),
+                         OU_level=c(0.15, 0.15, 0.15),
+                         OU_tau=c(1, 10, 100))
+
+pca_plots <- vector("list", nrow(param_sets))
+qt_plots  <- vector("list", nrow(param_sets))
+shared_legend <- NULL
+stats_rows <- list()
+
+for(pset in 1:nrow(param_sets)) {
+  wn_noise <- param_sets[pset,"WN_level"]
+  ou_noise <- param_sets[pset,"OU_level"]
+  ou_tau   <- param_sets[pset,"OU_tau"]
+  
+  # Run simulations
+  runner_white <- make_white_runner(wn_noise, topo, params_use, t(ic_use), h,
+                                    print_start, print_interval)
+  runner_ou    <- make_ou_runner(ou_noise, ou_tau, topo, params_use, t(ic_use), h,
+                                 print_start, print_interval)
+  # Get trajectories
+  trajW <- runner_white(sim_time_long)
+  trajO <- runner_ou(sim_time_long)
+  
+  # Count transitions & rates
+  qW <- q_of(trajW)
+  qO <- q_of(trajO)
+  tW <- make_time(nrow(trajW), print_start, print_interval)
+  tO <- make_time(nrow(trajO), print_start, print_interval)
+  swW <- count_switches(qW, thr$q_lo, thr$q_hi, min_stay_steps = 3)
+  swO <- count_switches(qO, thr$q_lo, thr$q_hi, min_stay_steps = 3)
+  rateW <- swW$n_switch / (tail(tW, 1) - head(tW, 1))
+  rateO <- swO$n_switch / (tail(tO, 1) - head(tO, 1))
+
+  # dwell-time summaries (overall mean across A/B episodes)
+  dwellW <- compute_dwells(tW, qW, thr$q_lo, thr$q_hi, min_stay_steps = 3)
+  dwellO <- compute_dwells(tO, qO, thr$q_lo, thr$q_hi, min_stay_steps = 3)
+
+  # Store transition stats per noise type
+  stats_rows[[length(stats_rows) + 1]] <- data.frame(
+    Amplitude = wn_noise, Type = "White",
+    Transitions = swW$n_switch,
+    Rate = rateW,
+    Dwell_mean = dwellW$mean_overall,
+    Dwell_mean_A = dwellW$mean_A,
+    Dwell_mean_B = dwellW$mean_B,
+    Episodes = dwellW$n_episodes,
+    Total_time = tail(tW, 1) - head(tW, 1),
+    Tau = NA_real_
+  )
+  
+  stats_rows[[length(stats_rows) + 1]] <- data.frame(
+    Amplitude = ou_noise, Type = paste0("OU (tau=", ou_tau, ")"),
+    Transitions = swO$n_switch,
+    Rate = rateO,
+    Dwell_mean = dwellO$mean_overall,
+    Dwell_mean_A = dwellO$mean_A,
+    Dwell_mean_B = dwellO$mean_B,
+    Episodes = dwellO$n_episodes,
+    Total_time = tail(tO, 1) - head(tO, 1),
+    Tau = ou_tau
+  )
+
+  # Prep data for plotting
+  dfW <- data.frame(t = tW, q = qW, type = "White")
+  dfO <- data.frame(t = tO, q = qO, type = paste0("OU (tau=", ou_tau, ")"))
+  both <- rbind(dfW, dfO)
+  
+  # q(t) plot
+  p_qt <- ggplot(both, aes(t, q, color = type)) +
+    geom_line(linewidth = 0.4, alpha = 0.9) +
+    geom_hline(yintercept = c(thr$q_lo, thr$q_hi), linetype = "dashed") +
+    labs(x = "Time", y = "q = A - B", color = "Type") +
+    theme_minimal() +
+    theme(axis.text = element_text(size=10, angle = 45),
+          axis.title = element_text(size=12),
+          plot.margin = margin(5, 10, 5, 5))
+  
+  # PCA prep
+  wn_traj_norm <- log2(1+trajW[which(trajW$A != 0 & trajW$B != 0),])
+  wn_traj_norm[,genes] <- sweep(wn_traj_norm[,genes], 2, tmpMeans, FUN = "-")
+  wn_traj_norm[,genes] <- sweep(wn_traj_norm[,genes], 2, tmpSds,   FUN = "/")
+  wn_traj_pca <- as.data.frame(as.matrix(wn_traj_norm[, c(1, 2)]) %*% pca$rotation)
+  colnames(wn_traj_pca)[1:2] <- c("PC1","PC2")
+  wn_traj_pca$Type <- "White"
+  
+  ou_traj_norm <- log2(1+trajO[which(trajO$A != 0 & trajO$B != 0),])
+  ou_traj_norm[,genes] <- sweep(ou_traj_norm[,genes], 2, tmpMeans, FUN = "-")
+  ou_traj_norm[,genes] <- sweep(ou_traj_norm[,genes], 2, tmpSds,   FUN = "/")
+  ou_traj_pca <- as.data.frame(as.matrix(ou_traj_norm[, c(1, 2)]) %*% pca$rotation)
+  colnames(ou_traj_pca)[1:2] <- c("PC1","PC2")
+  ou_traj_pca$Type <- paste0("OU")
+  
+  traj_pca_combined <- rbind(wn_traj_pca, ou_traj_pca)
+  
+  model_states_norm <- log2(1+model_states[,genes])
+  model_states_norm[,genes] <- sweep(model_states_norm[,genes], 2, tmpMeans, FUN = "-")
+  model_states_norm[,genes] <- sweep(model_states_norm[,genes], 2, tmpSds,   FUN = "/")
+  model_states_pca <- as.data.frame(as.matrix(model_states_norm[, c(1, 2)]) %*% pca$rotation)
+  colnames(model_states_pca) <- c("PC1","PC2")
+  
+  # PCA plot
+  p_pca <- ggplot(traj_pca_combined, aes(x=PC1, y=PC2, color=Type)) +
+    geom_point(alpha=0.15) +
+    geom_point(data=model_states_pca, aes(x=PC1, y=PC2), inherit.aes = FALSE,
+               size=1, color="red") +
+    labs(x = "PC1", y = "PC2", color="Type") +
+    theme_minimal() +
+    theme(axis.text = element_text(size=10),
+          axis.title = element_text(size=12),
+          plot.margin = margin(5, 10, 5, 5))
+  
+  # grab shared legend once (from first plot), then remove legends
+  if (pset == 1) {
+    shared_legend <- get_legend(
+      p_pca + theme(legend.position = "bottom",
+                    legend.key.height = unit(10, "pt"),
+                    legend.key.width  = unit(18, "pt"),
+                    legend.text = element_text(size=16),
+                    legend.title = element_text(size=18))
+    )
+  }
+  p_qt  <- p_qt  + theme(legend.position="none")
+  p_pca <- p_pca + theme(legend.position="none")
+  
+  pca_plots[[pset]] <- p_pca
+  qt_plots[[pset]]  <- p_qt
+}
+```
+
+
+```{r wn_vs_ou_sim_2_plots}
+# Column titles
+title_grobs <- lapply(seq_len(nrow(param_sets)), function(i) {
+  ggdraw() + draw_label(paste0("Tau = ", param_sets$OU_tau[i]),
+                        fontface = "bold", size = 16, hjust = 0.5, vjust = 0.5)
+})
+titles_row <- plot_grid(plotlist = title_grobs, nrow = 1)
+
+# 2x3 grid and legend
+top_row    <- plot_grid(plotlist = pca_plots, nrow = 1, align = "hv")
+bottom_row <- plot_grid(plotlist = qt_plots,  nrow = 1, align = "hv")
+grid_2x3   <- plot_grid(top_row, bottom_row, ncol = 1, rel_heights = c(1, 1))
+
+final_plot <- plot_grid(titles_row, grid_2x3, shared_legend,
+                        ncol = 1, rel_heights = c(0.10, 1.00, 0.18),
+                        align = "hv", axis = "tblr")
+
+print(final_plot)
+
+# Display transition statistics
+stats_tbl <- dplyr::bind_rows(stats_rows) |>
+  arrange(Amplitude, match(Type, c("White", paste0("OU (tau=", unique(stats_rows[[2]]$Tau), ")")))) |>
+  mutate(
+    across(c(Rate, Dwell_mean, Dwell_mean_A, Dwell_mean_B), ~signif(., 3)),
+    Amplitude = sprintf("%.3g", Amplitude)
+  )
+
+gt(stats_tbl) |>
+  tab_header(
+    title = md("**Transition & Dwell Statistics by Tau**"),
+    subtitle = "Per-simulation summaries for White vs OU noise"
+  ) |>
+  cols_label(
+    Amplitude = "Noise amplitude",
+    Type = "Noise type",
+    Transitions = "n transitions",
+    Rate = "rate (1/time)",
+    Dwell_mean = "mean dwell (time)",
+    Dwell_mean_A = "mean dwell A",
+    Dwell_mean_B = "mean dwell B",
+    Episodes = "n dwell episodes",
+    Total_time = "total simulated time",
+    Tau = "τ (OU)"
+  ) |>
+  sub_missing(columns = everything(), missing_text = "—") |>
+  tab_options(table.font.size = px(14)) |>
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(columns = c(Amplitude))
+  ) |>
+  tab_spanner(
+    label = "Dwell (by episode)",
+    columns = c(Dwell_mean, Dwell_mean_A, Dwell_mean_B)
+  )
+
+```
 
 
 

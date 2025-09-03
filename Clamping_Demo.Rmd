@@ -11,6 +11,8 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Setup
 
+First, we will import necessary libraries, define some helpful variables and create the directory structure for outputs.
+
 ```{r sim_setup, echo = T, results = 'hide', warning=FALSE, message=FALSE}
 rm(list=ls())
 #remotes::install_github("lusystemsbio/sRACIPE")
@@ -50,6 +52,8 @@ topo <- read.table(file.path("topos",paste0(topo_name,".tpo")), header=T)
 ```
 
 ## Initial Simulation, PCA & Clustering
+
+To prepare for signaling simulations, we will first simulate a toggle switch circuit and perform PCA and clustering on the unique steady states.
 
 ```{r initial_sims}
 
@@ -255,7 +259,7 @@ final_states_norm$Time <- "Final"
 states_comb <- rbind(ics_norm, final_states_norm)
 
 
-ggplot2::ggplot(states_comb,aes(x=A, y=B, color=Time)) +
+ggplot2::ggplot(states_comb,aes(x=A, y=B, color=Time, shape=Time)) +
   geom_point(alpha=0.6, size=3) +
   labs(x = "A", y = "B", color="Time") +
   theme_minimal() +
