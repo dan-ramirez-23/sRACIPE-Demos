@@ -1,0 +1,592 @@
+---
+title: "Perturbations Demo"
+author: "Dan Ramirez"
+date: "2025-08-27"
+output: html_document
+---
+
+```{r doc_setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introduction
+
+In this document, we will showcase the two new perturbation-related features in sRACIPE, namely clamping and parameter variation. These approaches allow for simulation of a GRN under variable conditions and can be used to model gene knockouts, cellular state transitions, drug perturbations, or other dynamical events. 
+
+The example used here will be a two-gene toggle switch, which we will filter to include bistable models, i.e. parameter sets such that there are two steady states roughly corresponding to "A high/B low" and "A low/B high." We will start out from steady states in both positions, then try to drive models out of the steady state and toward the other state. The same approaches can be used for more complex systems, but stronger perturbations may be needed to drive transitions in higher dimensions. 
+
+## Setup
+
+First, we will import necessary libraries, define some helpful variables and create the directory structure for outputs.
+
+```{r sim_setup, echo = T, results = 'hide', warning=FALSE, message=FALSE}
+rm(list=ls())
+#remotes::install_github("lusystemsbio/sRACIPE")
+library(sRACIPE)                 # GRN simulation
+library(ggplot2)                 # plotting
+library(microbenchmark)          # time cost benchmarking
+library(dplyr)                   # data management
+library(tidyr)                   # data management
+library(ComplexHeatmap)          # plotting
+# seed for reproducibility & color palette for plots
+set.seed(1234)
+cbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")[c(3,2,4:8)]
+
+nModels <- 1000
+nICs <- 100
+n_places_rounded <- 4
+
+topo_name <- "toggleSwitch"
+
+topoDir <- file.path(getwd(),topo_name)
+plotDir <- file.path(topoDir,"plots")
+dataDir <- file.path(topoDir,"data")
+
+if(!dir.exists(topoDir)) {
+  dir.create(topoDir)
+}
+if(!dir.exists(dataDir)) {
+  dir.create(dataDir)
+}
+if(!dir.exists(plotDir)) {
+  dir.create(plotDir)
+}
+
+topo <- read.table(file.path("topos",paste0(topo_name,".tpo")), header=T)
+
+
+```
+
+## Initial Simulation, PCA & Clustering
+
+To prepare for signaling simulations, we will first simulate a toggle switch circuit and perform PCA and clustering on the unique steady states.
+
+```{r initial_sims}
+
+racipe_fname <- file.path(dataDir,"racipe.Rds")
+if(!file.exists(racipe_fname)) {
+  racipe <- sracipeSimulate(topo, numModels = nModels, nIC = nICs)
+  saveRDS(racipe, racipe_fname)
+} else {
+  racipe <- readRDS(racipe_fname)
+}
+
+## GET UNIQUE STEADY STATES
+ss_unique_fname <- file.path(dataDir,"ss_unique.Rds")
+racipe_summary_fname <- file.path(dataDir,"racipe_summary.Rds")
+if(!file.exists(ss_unique_fname)) {
+  states <- round(as.data.frame(t(assay(racipe))), n_places_rounded)
+  states$Model <- rep(1:nModels, each=nICs)
+  ss_unique <- states %>%
+    group_by(Model) %>%
+    distinct(across(-Model), .keep_all = TRUE) %>%
+    mutate(State = row_number()) %>%
+    ungroup()
+
+  racipe_summary_df <- ss_unique %>%
+    group_by(Model) %>%
+    summarise(NumStates = n(), .groups = "drop")
+
+  saveRDS(ss_unique, ss_unique_fname)
+  saveRDS(racipe_summary_df, racipe_summary_fname)
+} else {
+  ss_unique <- readRDS(ss_unique_fname)
+  racipe_summary_df <- readRDS(racipe_summary_fname)
+}
+
+genes <- rownames(racipe)
+expr_mat <- ss_unique[,genes]
+tmpMeans <- rowMeans(t(log2(1+expr_mat)))
+tmpSds <- apply(t(log2(1+expr_mat)),1,sd)
+expr_mat_norm <- log2(1+expr_mat)
+expr_mat_norm[,genes] <- sweep(expr_mat_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+expr_mat_norm[,genes] <- sweep(expr_mat_norm[,genes], 2, tmpSds, FUN = "/") # scale
+
+## PCA
+pca_fname <- file.path(dataDir,"pca.Rds")
+if(!file.exists(pca_fname)) {
+
+  pca <- prcomp(expr_mat_norm[,genes])
+
+  saveRDS(pca, pca_fname)
+} else {
+  pca <- readRDS(pca_fname)
+}
+
+## CLUSTERING
+clust_fname <- file.path(dataDir,"cluster_labels.Rds")
+if(!file.exists(clust_fname)) {
+  k_use <- k_list[topo_name]
+  pca_data <- pca$x
+  dist_mat <- dist(pca_data)
+  hc <- hclust(dist_mat, method = "ward.D2")
+  cluster_labels <- cutree(hc, k = k_use)
+  saveRDS(cluster_labels, clust_fname)
+} else {
+  cluster_labels <- readRDS(clust_fname)
+}
+
+
+```
+
+## Plot simulated steady states
+
+```{r eda_plots, echo=TRUE, message=FALSE}
+
+
+# PCA
+pc1_weight <- round(100*summary(pca)$importance[2,1],2)
+pc2_weight <- round(100*summary(pca)$importance[2,2],2)
+plot_xlab <- paste("PC1 (",pc1_weight,"%)",sep="")
+plot_ylab <- paste("PC2 (",pc2_weight,"%)",sep="")
+
+
+
+## PLOTS
+ggplot(expr_mat_norm, aes(x=A, y=B, color=as.factor(cluster_labels))) +
+  geom_point(size=2) +
+  scale_color_manual(values=cbPalette) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  labs(color="Cluster") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14))
+
+
+
+
+
+ggplot(pca$x, aes(x=PC1, y=PC2, color=as.factor(cluster_labels))) +
+  geom_point(size=2) +
+  scale_color_manual(values=cbPalette) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  labs(color="Cluster") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14))
+
+
+# Heatmap
+ha_df <- data.frame(Cluster=cluster_labels)
+
+# Create an annotation object for the columns
+column_annotation <- HeatmapAnnotation(df = ha_df, 
+                                       col=list(Cluster=c("1"=unname(cbPalette[1]),"2"=unname(cbPalette[2]),
+                                                          "3"=unname(cbPalette[3]),"4"=unname(cbPalette[4]))))
+# Create the heatmap with annotation
+image <- Heatmap(as.matrix(t(expr_mat_norm)), 
+                 name = "Expression", 
+                 top_annotation = column_annotation,
+                 row_names_gp=gpar(fontsize=12),
+                 clustering_method_columns = "ward.D2",
+                 show_column_names = F)
+image
+  
+
+```
+
+## Clamping-based transition simulations
+
+We will try to drive bistable models from cluster 1 to cluster 2 by clamping gene B at the target levels (i.e., the value of B in the target steady state). We will simulate the bistable models with paired initializations in each cluster, then clamp B expression values to the target cluster levels until models converge. Next, we will remove the clamps and simulate until convergence again to allow the system to relax. This transient signal should drive models from cluster 1 to cluster 2. 
+
+We will show the effect of clamping with deterministic simulations here, but adding a small amount of noise can dramatically increase the efficacy, allowing more models to transition.
+
+### Identify bistable models
+```{r clamping_id_bistable}
+##### IDENTIFY BISTABLE MODELS #####
+# def: bistable models are those with multiple steady states across different clusters
+ss_unique$Cluster <- cluster_labels
+ss_unique <- as.data.frame(ss_unique)
+racipe_summary_df$Stability <- NA
+for(model in racipe_summary_df$Model) {
+  numModelClusters <- length(unique(ss_unique[which(ss_unique$Model == model),"Cluster"]))
+  if(numModelClusters == 2) {
+    racipe_summary_df[which(racipe_summary_df$Model == model), "Stability"] <- "Bistable"
+  }
+}
+bistable_models <- which(racipe_summary_df$Stability == "Bistable" & racipe_summary_df$NumStates == 2)
+```
+
+### Simulate transitions with clamps in place
+
+```{r clamp_sims}
+##### CLAMPING-DRIVEN TRANSITIONS #####
+## Subset bistable models & simulate transitions between clusters by clamping gene values
+keepIdx <- c()
+for(model in bistable_models) {
+  # add steady states for cluster 1 and 2
+  addIdx <- which(ss_unique$Model == model)
+  keepIdx <- c(keepIdx, addIdx)
+  
+}
+clamp_df <- tidyr::pivot_longer(ss_unique[keepIdx,], cols = all_of(genes),
+                         names_to = "Gene", values_to = "Expression")
+clamp_df$ModelIndex <- as.numeric(factor(clamp_df$Model))
+
+# set up racipe object with params & ICs from bistable models (paired initialization)
+racipe_bistable <- sracipeSimulate(topo, numModels = (2*length(bistable_models)), nIC = 1,
+                                   genIC = T, genParams = T, integrate = F)
+sracipeIC(racipe_bistable) <- t(ss_unique[keepIdx,genes])
+sracipeParams(racipe_bistable) <- sracipeParams(racipe)[rep(bistable_models, each=2),]
+
+# clamp B to drive toward cluster 2 values
+clamp_df_filt_A <- clamp_df[which(clamp_df$Cluster == 2 & clamp_df$Gene == "A"),]
+clamp_df_filt_B <- clamp_df[which(clamp_df$Cluster == 2 & clamp_df$Gene == "B"),]
+clamp_df_use <- data.frame(B=rep(clamp_df_filt_B$Expression, each=2))
+
+# simulate with clamping
+racipe_clamped <- sracipeSimulate(racipe_bistable, integrate=T, genIC = F, genParams = F,
+                                  geneClamping = clamp_df_use, numModels = 326, nIC = 1, stepper = "EM",
+                                  initialNoise = 0, scaledNoise = T, nNoise = 0, simDet = T)
+```
+
+
+### Relaxation simulations with clamps removed
+
+```{r clamp_relax_sims}
+racipe_clamp_relax <- racipe_clamped
+sracipeIC(racipe_clamp_relax) <- assay(racipe_clamped)
+racipe_clamp_relax <- sracipeSimulate(racipe_clamp_relax, integrate=T, genIC=F, genParams = F,
+                                      numModels = 326, nIC=1, stepper = "EM", initialNoise = 0, nNoise = 0, simDet = T)
+
+```
+### Tally clamp-driven transitions
+
+We see below that about half of the models beginning in cluster 1 moved to cluster 2. We might improve on this by 1) adding a level of transient noise and possibly simulating a longer duration, or 2) clamping additional genes (in a case where more genes are present in the network). Bifurcation analyses with respect to the clamp value might also reveal the critical points where multistability becomes possible or not, but is not shown here.
+
+```{r}
+## tally how many models transitioned between clusters
+initial_states <- t(sracipeIC(racipe_clamped))
+final_states <- t(assay(racipe_clamped))
+relaxed_states <- t(assay(racipe_clamp_relax))
+
+
+clamp_signaling_transition_summary <- data.frame(Model=rep(bistable_models, each=2),
+                                                 Init_Clust=cluster_labels[keepIdx],
+                                                 Final_Clust=NA
+                                                 )
+for(i in 1:nrow(relaxed_states)) {
+  model <- bistable_models[round((i+0.1) / 2)]
+  model_states <- ss_unique[which(ss_unique$Model == model),]
+  
+  final_state <- relaxed_states[c(i, i),]
+  diffs = final_state - model_states[,genes]
+  diffs$Cluster <- model_states$Cluster
+  diff_sums <- rowSums(diffs[,genes])
+  names(diff_sums) <- model_states$Cluster
+  
+  if(abs(diff_sums[which(names(diff_sums) == 1)]) < 1e-4) {
+    clamp_signaling_transition_summary[i,"Final_Clust"] <- 1
+  } else if(diff_sums[which(names(diff_sums) == 2)] < 1e-4) {
+    clamp_signaling_transition_summary[i,"Final_Clust"] <- 2
+  } else {
+    clamp_signaling_transition_summary[i,"Final_Clust"] <- "New"
+  }
+    
+}
+clamp_signaling_transition_summary$Transition <- "None"
+clamp_signaling_transition_summary[which(clamp_signaling_transition_summary$Init_Clust == 1 &
+                                        clamp_signaling_transition_summary$Final_Clust == 2   ),"Transition"] <- "1-->2"
+clamp_signaling_transition_summary[which(clamp_signaling_transition_summary$Init_Clust == 2 &
+                                           clamp_signaling_transition_summary$Final_Clust == 1   ),"Transition"] <- "2-->1"
+clamp_signaling_transition_summary[which(clamp_signaling_transition_summary$Init_Clust == 1 &
+                                           clamp_signaling_transition_summary$Final_Clust == 1   ),"Transition"] <- "1-->1"
+clamp_signaling_transition_summary[which(clamp_signaling_transition_summary$Init_Clust == 2 &
+                                           clamp_signaling_transition_summary$Final_Clust == 2   ),"Transition"] <- "2-->2"
+table(clamp_signaling_transition_summary$Transition)
+```
+
+
+
+### Plot results of clamping simulation
+
+As the plot shows, many of the bistable models transitioned from their cluster 1 (A high) state to their cluster 2 (B high) state under clamping, even with no noise applied. In larger and more complex circuits, it may be necessary to clamp multiple genes or combine clamping with noise to enable state transitions across an ensemble. 
+
+
+```{r clamp_plots, message=FALSE, warning=FALSE}
+# plot initial & final states from clamping
+ics_raw <- as.data.frame(t(sracipeIC(racipe_bistable)))
+ics_norm <- log2(1+ics_raw)
+ics_norm[,genes] <- sweep(ics_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+ics_norm[,genes] <- sweep(ics_norm[,genes], 2, tmpSds, FUN = "/") # scale
+ics_pca <- as.data.frame(as.matrix(ics_norm[, c(1, 2)]) %*% pca$rotation)
+ics_norm$Time <- "Initial"
+
+final_states_raw <- as.data.frame(t(assay(racipe_clamp_relax)))
+final_states_norm <- log2(1+final_states_raw)
+final_states_norm[,genes] <- sweep(final_states_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+final_states_norm[,genes] <- sweep(final_states_norm[,genes], 2, tmpSds, FUN = "/") # scale
+final_states_pca <- as.data.frame(as.matrix(final_states_norm[, c(1, 2)]) %*% pca$rotation)
+final_states_norm$Time <- "Final"
+
+
+states_comb <- rbind(ics_norm, final_states_norm)
+
+image <- ggplot2::ggplot(states_comb,aes(x=A, y=B, color=Time, shape=Time, size=Time)) +
+  geom_point(alpha=0.7) +
+  scale_size_discrete(range=c(5,7), breaks=c('Initial', 'Final')) +
+  scale_color_discrete(breaks=c('Initial', 'Final')) +
+  scale_shape_discrete(breaks=c('Initial', 'Final')) +
+  labs(x = "A", y = "B", color="Time") +
+  theme_minimal() +
+  theme(axis.text = element_text(size=24),
+        axis.title = element_text(size=28),
+        plot.background = element_rect(color = "white"),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"))
+image
+
+
+clamping_plot_fname <- file.path(plotDir,"toggleSwitch_clamping_transitions_scatter.pdf")
+pdf(clamping_plot_fname, height = 10, width = 10)
+print(image)
+invisible(dev.off())
+
+
+```
+## Parameter-based transition simulations
+
+### Simulate a transient signal
+
+First, we will begin from paired initializations of every bistable model with one IC in each steady state, then apply a temporary signal which increases production of gene B - this should drive models from cluster 1 to cluster 2. 
+
+For this simulation, we will apply the signal under deterministic conditions and increase B production 10-fold.
+
+```{r signaling_sims}
+##### EXTRINSIC SIGNAL-DRIVEN TRANSITIONS #####
+## Subset bistable models & simulate transitions between clusters using parameter modifications
+# As opposed to clamping B, here we will drive toward cluster 2 by increasing G_B 10x
+param_signaling_df <- data.frame(Time=c(0, 25, 50, 200), 
+                                 G_B=c(1,10,1,1))
+#debug(sracipeSimulate)
+racipe_signaling <- sracipeSimulate(racipe_bistable, integrate=T, genIC = F, genParams = F,
+                                    paramSignalVals = param_signaling_df, simulationTime = 200,
+                                    initialNoise = 0, nNoise = 0, simDet = T, stepper = "EM", scaledNoise = T)
+
+
+racipe_signaling_relax <- racipe_signaling
+sracipeIC(racipe_signaling_relax) <- assay(racipe_signaling,"deterministic")
+racipe_signaling_relax <- sracipeSimulate(racipe_signaling_relax, integrate=T, 
+                                          genIC = F, genParams = F,
+                                          simulationTime = 100,
+                                          initialNoise = 0, nNoise = 0, simDet = T, stepper="EM")
+```
+
+### Tally signal-driven transitions
+
+This approach did well, driving the majority of models from cluster 1 to cluster 2. Varying the maximal fold change or timeline could drastically alter results, or exploring modifying other parameters. As in the clamping case, adding a small amount of transient noise during the signaling can also increase transition rates.
+
+```{r signaling_sim_analysis}
+## tally how many models transitioned between clusters
+initial_states <- t(sracipeIC(racipe_signaling))
+final_states <- t(assay(racipe_signaling))
+relaxed_states <- t(assay(racipe_signaling_relax))
+
+
+param_signaling_transition_summary <- data.frame(Model=rep(bistable_models, each=2),
+                                                 Init_Clust=cluster_labels[keepIdx],
+                                                 Final_Clust=NA
+                                                 )
+for(i in 1:nrow(relaxed_states)) {
+  model <- bistable_models[round((i+0.1) / 2)]
+  model_states <- ss_unique[which(ss_unique$Model == model),]
+  
+  final_state <- relaxed_states[c(i, i),]
+  diffs = final_state - model_states[,genes]
+  diffs$Cluster <- model_states$Cluster
+  diff_sums <- rowSums(diffs[,genes])
+  names(diff_sums) <- model_states$Cluster
+  
+  if(abs(diff_sums[which(names(diff_sums) == 1)]) < 1e-4) {
+    param_signaling_transition_summary[i,"Final_Clust"] <- 1
+  } else if(diff_sums[which(names(diff_sums) == 2)] < 1e-4) {
+    param_signaling_transition_summary[i,"Final_Clust"] <- 2
+  } else {
+    param_signaling_transition_summary[i,"Final_Clust"] <- "New"
+  }
+    
+}
+param_signaling_transition_summary$Transition <- "None"
+param_signaling_transition_summary[which(param_signaling_transition_summary$Init_Clust == 1 &
+                                        param_signaling_transition_summary$Final_Clust == 2   ),"Transition"] <- "1-->2"
+param_signaling_transition_summary[which(param_signaling_transition_summary$Init_Clust == 2 &
+                                           param_signaling_transition_summary$Final_Clust == 1   ),"Transition"] <- "2-->1"
+param_signaling_transition_summary[which(param_signaling_transition_summary$Init_Clust == 2 &
+                                           param_signaling_transition_summary$Final_Clust == 2   ),"Transition"] <- "2-->2"
+param_signaling_transition_summary[which(param_signaling_transition_summary$Init_Clust == 1 &
+                                           param_signaling_transition_summary$Final_Clust == 1   ),"Transition"] <- "1-->1"
+table(param_signaling_transition_summary$Transition)
+
+```
+
+```{r signaling_sim_plots, message=FALSE, warning=FALSE}
+# plot initial & final states from clamping
+ics_raw <- as.data.frame(t(sracipeIC(racipe_bistable)))
+ics_norm <- log2(1+ics_raw)
+ics_norm[,genes] <- sweep(ics_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+ics_norm[,genes] <- sweep(ics_norm[,genes], 2, tmpSds, FUN = "/") # scale
+ics_pca <- as.data.frame(as.matrix(ics_norm[, c(1, 2)]) %*% pca$rotation)
+ics_norm$Time <- "Initial"
+
+final_states_raw <- as.data.frame(t(assay(racipe_signaling)))
+final_states_norm <- log2(1+final_states_raw)
+final_states_norm[,genes] <- sweep(final_states_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+final_states_norm[,genes] <- sweep(final_states_norm[,genes], 2, tmpSds, FUN = "/") # scale
+final_states_pca <- as.data.frame(as.matrix(final_states_norm[, c(1, 2)]) %*% pca$rotation)
+final_states_norm$Time <- "Final"
+
+
+states_comb <- rbind(ics_norm, final_states_norm)
+
+
+image <- ggplot(states_comb,aes(x=A, y=B, color=Time, shape=Time, size=Time)) +
+  geom_point(alpha=0.7) +
+  scale_size_discrete(range=c(5,7), breaks=c('Initial', 'Final')) +
+  scale_color_discrete(breaks=c('Initial', 'Final')) +
+  scale_shape_discrete(breaks=c('Initial', 'Final')) +
+  labs(x = "A", y = "B", color="Time") +
+  theme_minimal() +
+  theme(axis.text = element_text(size=24),
+        axis.title = element_text(size=28),
+        plot.background = element_rect(color = "white"),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"))
+image
+
+
+signaling_plot_fname <- file.path(plotDir,"toggleSwitch_signaling_transitions_scatter.pdf")
+pdf(signaling_plot_fname, height = 10, width = 10)
+print(image)
+invisible(dev.off())
+
+```
+
+
+### Weaker signaling
+
+Next, we will reduce the strength of the signal to capture a more heterogeneous response. We will reduce the maximal FC to only 2.
+
+```{r signaling_sims_weaker}
+##### EXTRINSIC SIGNAL-DRIVEN TRANSITIONS #####
+## Subset bistable models & simulate transitions between clusters using parameter modifications
+# As opposed to clamping B, here we will drive toward cluster 2 by increasing G_B 2x
+param_signaling_df <- data.frame(Time=c(0, 25, 50, 200), 
+                                 G_B=c(1,2,1,1))
+#debug(sracipeSimulate)
+racipe_signaling <- sracipeSimulate(racipe_bistable, integrate=T, genIC = F, genParams = F,
+                                    paramSignalVals = param_signaling_df, simulationTime = 200,
+                                    initialNoise = 0, nNoise = 0, simDet = T, stepper = "EM", scaledNoise = T)
+
+
+racipe_signaling_relax <- racipe_signaling
+sracipeIC(racipe_signaling_relax) <- assay(racipe_signaling,"deterministic")
+racipe_signaling_relax <- sracipeSimulate(racipe_signaling_relax, integrate=T, 
+                                          genIC = F, genParams = F,
+                                          simulationTime = 100,
+                                          initialNoise = 0, nNoise = 0, simDet = T, stepper="EM")
+```
+
+As expected, fewer models transition in this case. Further analysis could be done on the features of a model that make it more or less susceptible to induced state transitions via either approach described here, or the optimal targets to perturb to achieve a desired transition over the whole ensemble. 
+
+```{r signaling_sim_weaker_analysis}
+## tally how many models transitioned between clusters
+initial_states <- t(sracipeIC(racipe_signaling))
+final_states <- t(assay(racipe_signaling))
+relaxed_states <- t(assay(racipe_signaling_relax))
+
+
+param_signaling_transition_summary <- data.frame(Model=rep(bistable_models, each=2),
+                                                 Init_Clust=cluster_labels[keepIdx],
+                                                 Final_Clust=NA
+                                                 )
+for(i in 1:nrow(relaxed_states)) {
+  model <- bistable_models[round((i+0.1) / 2)]
+  model_states <- ss_unique[which(ss_unique$Model == model),]
+  
+  final_state <- relaxed_states[c(i, i),]
+  diffs = final_state - model_states[,genes]
+  diffs$Cluster <- model_states$Cluster
+  diff_sums <- rowSums(diffs[,genes])
+  names(diff_sums) <- model_states$Cluster
+  
+  if(abs(diff_sums[which(names(diff_sums) == 1)]) < 1e-4) {
+    param_signaling_transition_summary[i,"Final_Clust"] <- 1
+  } else if(diff_sums[which(names(diff_sums) == 2)] < 1e-4) {
+    param_signaling_transition_summary[i,"Final_Clust"] <- 2
+  } else {
+    param_signaling_transition_summary[i,"Final_Clust"] <- "New"
+  }
+    
+}
+param_signaling_transition_summary$Transition <- "None"
+param_signaling_transition_summary[which(param_signaling_transition_summary$Init_Clust == 1 &
+                                        param_signaling_transition_summary$Final_Clust == 2   ),"Transition"] <- "1-->2"
+param_signaling_transition_summary[which(param_signaling_transition_summary$Init_Clust == 2 &
+                                           param_signaling_transition_summary$Final_Clust == 1   ),"Transition"] <- "2-->1"
+param_signaling_transition_summary[which(param_signaling_transition_summary$Init_Clust == 2 &
+                                           param_signaling_transition_summary$Final_Clust == 2   ),"Transition"] <- "2-->2"
+param_signaling_transition_summary[which(param_signaling_transition_summary$Init_Clust == 1 &
+                                           param_signaling_transition_summary$Final_Clust == 1   ),"Transition"] <- "1-->1"
+table(param_signaling_transition_summary$Transition)
+
+```
+
+
+```{r signaling_sim_weaker_plots, message=FALSE, warning=FALSE}
+# plot initial & final states from clamping
+ics_raw <- as.data.frame(t(sracipeIC(racipe_bistable)))
+ics_norm <- log2(1+ics_raw)
+ics_norm[,genes] <- sweep(ics_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+ics_norm[,genes] <- sweep(ics_norm[,genes], 2, tmpSds, FUN = "/") # scale
+ics_pca <- as.data.frame(as.matrix(ics_norm[, c(1, 2)]) %*% pca$rotation)
+ics_norm$Time <- "Initial"
+
+final_states_raw <- as.data.frame(t(assay(racipe_signaling)))
+final_states_norm <- log2(1+final_states_raw)
+final_states_norm[,genes] <- sweep(final_states_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+final_states_norm[,genes] <- sweep(final_states_norm[,genes], 2, tmpSds, FUN = "/") # scale
+final_states_pca <- as.data.frame(as.matrix(final_states_norm[, c(1, 2)]) %*% pca$rotation)
+final_states_norm$Time <- "Final"
+
+
+states_comb <- rbind(ics_norm, final_states_norm)
+
+
+image <- ggplot(states_comb,aes(x=A, y=B, color=Time, shape=Time, size=Time)) +
+  geom_point(alpha=0.7) +
+  scale_size_discrete(range=c(5,7), breaks=c('Initial', 'Final')) +
+  scale_color_discrete(breaks=c('Initial', 'Final')) +
+  scale_shape_discrete(breaks=c('Initial', 'Final')) +
+  labs(x = "A", y = "B", color="Time") +
+  theme_minimal() +
+  theme(axis.text = element_text(size=24),
+        axis.title = element_text(size=28),
+        plot.background = element_rect(color = "white"),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"))
+image
+
+
+signaling_plot_fname <- file.path(plotDir,"toggleSwitch_signaling_weaker_transitions_scatter.pdf")
+pdf(signaling_plot_fname, height = 10, width = 10)
+print(image)
+invisible(dev.off())
+
+```
+
+
+
+
