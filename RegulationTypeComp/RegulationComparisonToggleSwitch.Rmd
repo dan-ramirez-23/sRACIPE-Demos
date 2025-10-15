@@ -1,0 +1,232 @@
+---
+title: "Regulation Type Comparison for Toggle Switch"
+author: "Aidan Tillman, Daniel Ramirez"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+library(sRACIPE)
+library(ggplot2)
+library(ComplexHeatmap)
+```
+
+## Introduction 
+Here we use some synthetic circuits to compare how distributions of features changes when depending on whether Transcription Factor (TF) or Protein Degradation (PD) regulation occurs. To begin, we pull both forms of the circuit from the topos folder and generate ensembles for analysis.
+
+```{r message=FALSE, warning=FALSE}
+toggleSwitch_tf <- read.table(file.path("../topos",paste0("toggleSwitch",".tpo")), header=T)
+toggleSwitch_pd <- read.table(file.path("../topos",paste0("toggleSwitch_pd",".tpo")), header=T)
+```
+
+
+```{r eval=FALSE}
+
+ts_tfSet <- sracipeSimulate(circuit = toggleSwitch_tf, numModels = 1000, nIC = 200,
+                            uniqueDigits = 2)
+ts_pdSet <- sracipeSimulate(circuit = toggleSwitch_pd, numModels = 1000, nIC = 200,
+                            uniqueDigits = 2, foldChangeMinDeg = 1, foldChangeMaxDeg = 100)
+```
+
+```{r}
+load(file.path("../regCompData",paste0("ts_tfSet",".RDA")))
+load(file.path("../regCompData",paste0("ts_pdSet",".RDA")))
+
+```
+
+
+## Bistability Analysis
+The first comparison we can make is by checking how robust bistability is in the circuit under each regulation type. One way to do this is by comparing the fraction of models with 2 steady states in each ensemble. To simplify these types of calculations, the number of unique steady states per model in the ensemble is automatically stored in the output metadata when nIC > 1 
+
+```{r}
+ts_tfStateCounts <- ts_tfSet@metadata[["uniqueStateCounts"]][["UniqueStableStateNo"]]
+ts_pdStateCounts <- ts_pdSet@metadata[["uniqueStateCounts"]][["UniqueStableStateNo"]]
+```
+
+From here, we can make a bar plot to compare the proportions of bistability
+```{r echo=FALSE}
+
+
+state_pd_plot <- data.frame(
+  setup= "PD",
+  stateCount = ts_pdStateCounts
+)
+state_tf_plot <- data.frame(
+    setup= "TF",
+    stateCount = ts_tfStateCounts
+)
+
+state_plot <- bind_rows(state_pd_plot, state_tf_plot)
+
+state_plot <- state_plot %>% filter(stateCount %in% 1:6)
+
+state_summary <- state_plot %>%
+  group_by(setup, stateCount) %>%
+  summarise(count = n()) %>%
+  group_by(setup) %>%
+  mutate(prop = count / sum(count))
+
+plot_group <- function(g) {
+  ggplot(dplyr::filter(state_summary),
+         aes(x = factor(stateCount), y = prop, fill = setup)) +
+    geom_col(position = "dodge") +
+    scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+    labs(
+      x = "State Count",
+      y = "Proportion",
+      fill = "Setup",
+      title = paste("Group")
+    ) +
+    theme_minimal()  +
+    theme(
+      axis.text.x = element_text(size = 16),
+      axis.text.y = element_text(size = 16, face="bold"),
+      axis.title = element_text(size = 16))
+}
+
+plot_group0 <- plot_group(0)
+
+# Example: print them
+print(plot_group0)
+
+
+```
+
+Alas, from the barplot it appears qualitatively that bistability has similar incidence in either regulation regime.
+
+## State distribution analysis
+
+Another way to compare the circuits is to consider the the clustered distribution of steady states changes under each regulation type. We can use the sracipeUniqueStates() function to only examine unique steady states in our ensembles by filtering out repeats.
+
+```{r}
+ts_tf_SS <- sracipeUniqueStates(ts_tfSet)
+ts_pd_SS <- sracipeUniqueStates(ts_pdSet)
+```
+
+sracipeUniqueStates() returns the steady states in a list so that we can still connect them to their original model parameter set, but to use the states for clustering, we need to cbind the list into a single dataframe, while filtering out the models with no steady states.
+
+```{r}
+ts_tf_SS <- Filter(function(x) nrow(x) > 0 && ncol(x) > 0, ts_tf_SS)
+ts_tf_SS <- t(do.call(cbind, ts_tf_SS))
+
+ts_pd_SS <- Filter(function(x) nrow(x) > 0 && ncol(x) > 0, ts_pd_SS)
+ts_pd_SS <- t(do.call(cbind, ts_pd_SS))
+```
+
+Next we perform normalization on the data by log-transforming the states and normalizing by mean and standard deviation by gene. Because we want to compare the resulting clusters, it is important to normalize by the same mean and standard deviation for both data sets. Here, we have chosen to normalize the PD data using the TF means and standard deviations, which "projects" the PD data onto the TF space.
+
+```{r}
+
+tmpMeans <- rowMeans(t(log2(1+ts_tf_SS)))
+tmpSds <- apply(t(log2(1+ts_tf_SS)),1,sd)
+tf_SS_norm <- log2(1+ts_tf_SS)
+tf_SS_norm <- sweep(tf_SS_norm, 2, tmpMeans, FUN = "-") # scale
+tf_SS_norm <- sweep(tf_SS_norm, 2, tmpSds, FUN = "/") # scale
+
+pd_SS_norm <- log2(1+ts_pd_SS) # Log transform
+pd_SS_norm <- sweep(pd_SS_norm, 2, tmpMeans, FUN = "-") # scale
+pd_SS_norm <- sweep(pd_SS_norm, 2, tmpSds, FUN = "/") # scale
+
+```
+
+Next, PCA is performed on the TF data, and we continue to project the PD data into the PCA space for the TF data.
+
+```{r}
+pca_tf <- prcomp(tf_SS_norm)
+pca_pd <- scale(pd_SS_norm, pca_tf$center, pca_tf$scale) %*% pca_tf$rotation
+
+```
+
+Now that we have finished preparing our data for comparison, we can perform hierarchical clustering on each data set. Ideally, one should use a statistical method to determine the ideal number of clusters, but in this simple case, we know a priori that there should be two clusters.
+
+```{r}
+
+k_use <- 2
+dist_mat_tf <- dist(pca_tf$x)
+hc_tf <- hclust(dist_mat_tf, method = "ward.D2")
+cluster_labels_tf <- cutree(hc_tf, k = k_use)
+
+dist_mat_pd <- dist(pca_pd)
+hc_pd <- hclust(dist_mat_pd, method = "ward.D2")
+cluster_labels_pd <- cutree(hc_pd, k = k_use)
+
+```
+
+The last step is plot the results of the clustering as projected onto the same PCA space. This gives a clear visualization of how the distribution changes shape between distribution types.
+
+```{r echo=FALSE}
+pc1_weight <- round(100*summary(pca_tf)$importance[2,1],2)
+pc2_weight <- round(100*summary(pca_tf)$importance[2,2],2)
+plot_xlab <- paste("PC1 (",pc1_weight,"%)",sep="")
+plot_ylab <- paste("PC2 (",pc2_weight,"%)",sep="")
+
+image_tf <- ggplot(pca_tf$x, aes(x=PC1, y=PC2, color=as.factor(cluster_labels_tf))) +
+  geom_point(size=2) +
+  scale_color_manual(values=c("blue", "red")) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  xlim(-2.8,2.8) + 
+  ylim(-2,2) +
+  labs(color="Cluster") + 
+  ggtitle("Toggle Switch TF") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14),
+        plot.title = element_text(size = 22, hjust = 0.5))
+image_tf
+
+
+image_pd <- ggplot(pca_pd, aes(x=PC1, y=PC2, color=as.factor(cluster_labels_pd))) +
+  geom_point(size=2) +
+  scale_color_manual(values=c("blue", "red")) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  xlim(-2.8,2.8) + 
+  ylim(-2,2) +
+  labs(color="Cluster") + 
+  ggtitle("Toggle Switch PD") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14),
+        plot.title = element_text(size = 22, hjust = 0.5))
+image_pd
+
+```
+
+
+
+```{r}
+# Heatmap
+image <- Heatmap(as.matrix(t(tf_SS_norm)), 
+                 name = "Expression (TF)", 
+                 row_names_gp=gpar(fontsize=12),
+                 clustering_method_columns = "ward.D2",
+                 show_column_names = F)
+image
+
+
+
+image <- Heatmap(as.matrix(t(pd_SS_norm)), 
+                 name = "Expression (PD)",
+                 row_names_gp=gpar(fontsize=12),
+                 clustering_method_columns = "ward.D2",
+                 show_column_names = F)
+image
+  
+
+```
+

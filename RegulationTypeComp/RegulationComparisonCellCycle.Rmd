@@ -1,0 +1,344 @@
+---
+title: "Regulation Type Comparison for Yeast Cell Cycle"
+author: "Aidan Tillman"
+date: "`r Sys.Date()`"
+bibliography: cellcycle.bib
+link-citations: true
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(sRACIPE)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+```
+
+## Introduction
+In this vignette we will consider two models for a gene regulatory network (GRN) which controls the yeast cell cycle. Specifically, we will consider the GRN studied in [@cellcycle], once with the fully diverse regulatory regime described in the original article, and then under a simpler model where every interaction is assumed to be mathematically equivalent to a transcription factor interaction. Lastly, we will demonstrate how to visualize simulated limit cycle data as a time series. The first step is loading the GRN topology files. 
+
+```{r message=FALSE, warning=FALSE}
+cellCycle <- read.table(file.path("../topos",paste0("cellcycle",".tpo")), header=T)
+cellCycle_tf <- read.table(file.path("../topos",paste0("cellcycle_tf",".tpo")), header=T)
+```
+
+## Estimating Proper Runtime
+Before running a full simulation, it is important to estimate an ideal runtime using the numConvergenceIter parameter. This network is known to exhibit oscillatory dynamics, so even with sRACIPE's dynamic stop times, the simulation is likely to run as long as we allow it. Furthermore, due to the size of the network, the simulation is quite slow, so we want to set a run time that is as short as possible while still giving time for the stable models to converge. It is due to the size that we also use the quicker but less precise Euler stepper for integration. To estimate the run time, we can run small trial simulations with only a few models.
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+cSet <- sracipeSimulate(circuit = cellCycle, numModels = 100, nIC = 5, numConvergenceIter = 50,
+                        stepper = 'EM')
+cSet_tf <- sracipeSimulate(circuit = cellCycle_tf, numModels = 100, nIC = 5, numConvergenceIter = 50,
+                           stepper = 'EM')
+```
+We can use the sracipeConvergeDist() function to quickly visualize the rate of convergence for each version of the network. Furthermore, the total proportion of stable states at the end of the simulation is stored in the metadata.
+```{r}
+cSet <- sracipeConvergeDist(cSet)
+cSet_tf <- sracipeConvergeDist(cSet_tf)
+
+metadata(cSet)$stableProportion
+metadata(cSet_tf)$stableProportion
+```
+From the graphs, it appears that 25 iterations is a reasonable amount to run the simulation, so we will use that number.
+
+## Running the full simulation
+Of course, even with a run time optimization and using the Euler stepper, the full simulation for these networks would be too long to run within this vignette, so we ran them separately and stored the results. For reproducibility, below is the simulation code used to generate the data.  
+```{r eval=FALSE}
+cSet <- sracipeSimulate(circuit = cellCycle, numModels = 2500, nIC = 100, numConvergenceIter = 25,
+                        stepper = 'EM', maxLCs = 1, limitcycles = TRUE, LCStepper = "E")
+cSet_tf <- sracipeSimulate(circuit = cellCycle_tf, numModels = 2500, nIC = 100, numConvergenceIter = 30,
+                        stepper = 'EM', maxLCs = 1, limitcycles = TRUE, LCStepper = 'E', uniqueDigits = 1)
+```
+The above code was run four times and the outputs were stored for analysis.
+
+## Loading the simulation data with sracipeCombineRacipeSE()
+Using the sracipeCombineRacipeSE() function, we can convert the 4 RacipeSE objects we have for each circuit into a single RacipeSE object each. First we collect the objects as a list and then use the list as the input for sracipeCombineRacipeSE. Having just one RacipeSE object for each ensemble simplifies the analysis.
+
+```{r}
+
+for(i in 1:4){
+  load(file.path("../ccData",paste0("cellCycleData",i,".RDA")))
+}
+racipeNames <- ls(pattern = "^cSet[0-9]+$")
+ids <- sub("cSet", "", racipeNames)
+# Build the list
+racipeList <- setNames(mget(racipeNames), ids)
+
+rm(list = racipeNames)
+
+cSet <- sracipeCombineRacipeSE(racipeList)
+
+rm(racipeList)
+
+cc_reg_SS <- sracipeUniqueStates(cSet)
+cc_regStateCounts <- cSet@metadata[["uniqueStateCounts"]][["UniqueStableStateNo"]]
+LC_reg <- metadata(cSet)$LCData
+
+rm(cSet)
+
+for(i in 1:4){
+  load(file.path("../ccData",paste0("cellCycleTFData",i,".RDA")))
+}
+racipeNames <- ls(pattern = "^cSet_tf[0-9]+$")
+ids <- sub("cSet_tf", "", racipeNames)
+# Build the list
+racipeList <- setNames(mget(racipeNames), ids)
+
+rm(list = racipeNames)
+
+cSet_tf <- sracipeCombineRacipeSE(racipeList)
+
+rm(racipeList)
+
+cc_tf_SS <- sracipeUniqueStates(cSet_tf)
+cc_tfStateCounts <- cSet_tf@metadata[["uniqueStateCounts"]][["UniqueStableStateNo"]]
+LC_tf <- metadata(cSet_tf)$LCData
+
+rm(cSet_tf)
+
+```
+
+## Compare dynamical mode distributions
+
+First, we can consider how the possible dynamical modes change as proportions of the ensemble for each regulatory regime. We already have vectors for the steady state quantities for each ensemble, so now we just need to note which models produce limit cycles. Because we only allowed one limit cycle per model in our simulations, this is relatively simple.
+```{r}
+reg_LCbool <- integer(10000)
+reg_LCbool[LC_reg[[1]]] <- 1
+reg_LCbool[unique(LC_reg[LC_reg[[2]] == 2, 1])] <- 2
+
+tf_LCbool <- integer(10000)
+tf_LCbool[LC_tf[[1]]] <- 1
+tf_LCbool[unique(LC_tf[LC_tf[[2]] == 2, 1])] <- 2
+
+```
+The vectors we just created record which models in each ensemble produced limit cycles. This allows us to determine if models achieved both a stable steady state and limit cycles.
+
+```{r echo=FALSE}
+
+
+state_reg_plot <- data.frame(
+  setup= "Diverse",
+  stateCount = cc_regStateCounts,
+  group = reg_LCbool
+)
+state_tf_plot <- data.frame(
+    setup= "TF",
+    stateCount = cc_tfStateCounts,
+  group = tf_LCbool
+)
+
+state_plot <- bind_rows(state_reg_plot, state_tf_plot)
+
+state_plot <- state_plot %>% filter(stateCount %in% 0:6)
+
+state_summary <- state_plot %>%
+  group_by(setup, group, stateCount) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(setup) %>%
+  mutate(prop = count / sum(count))
+
+plot_group <- function(g) {
+  ggplot(dplyr::filter(state_summary, group == g),
+         aes(x = factor(stateCount), y = prop, fill = setup)) +
+    geom_col(position = "dodge") +
+    scale_y_continuous(labels = scales::percent, limits = c(0, .55)) +
+    labs(
+      x = "State Count",
+      y = "Proportion",
+      fill = "Setup",
+      title = paste("Group", g)
+    ) +
+    theme_minimal()  +
+    theme(
+      axis.text.x = element_text(size = 14),
+      axis.text.y = element_text(size = 14, face="bold"),
+      axis.title = element_text(size = 16))
+}
+
+plot_group0 <- plot_group(0)
+plot_group1 <- plot_group(1)
+plot_group2 <- plot_group(2)
+
+# Example: print them
+print(plot_group0)
+print(plot_group1)
+print(plot_group2)
+
+```
+
+It appears that the diverse regulatory model allows for more complex dynamical modes in the ensemble.
+
+## Compare distribution of Steady States
+Our next analysis will be to compare the clustered steady state distributions of the different regulatory regimes. 
+
+```{r}
+cc_reg_SS <- Filter(function(x) nrow(x) > 0 && ncol(x) > 0, cc_reg_SS)
+cc_reg_SS <- t(do.call(cbind, cc_reg_SS))
+
+cc_tf_SS <- Filter(function(x) nrow(x) > 0 && ncol(x) > 0, cc_tf_SS)
+cc_tf_SS <- t(do.call(cbind, cc_tf_SS))
+```
+
+Now we can normalize our data, with the plan of projecting the TF data onto the data for the diverse regulatory regime.
+
+```{r}
+tmpMeans <- rowMeans(t(log2(1+cc_reg_SS)))
+tmpSds <- apply(t(log2(1+cc_reg_SS)),1,sd)
+reg_SS_norm <- log2(1+cc_reg_SS)
+reg_SS_norm <- sweep(reg_SS_norm, 2, tmpMeans, FUN = "-") # scale
+reg_SS_norm <- sweep(reg_SS_norm, 2, tmpSds, FUN = "/") # scale
+
+tf_SS_norm <- log2(1+cc_tf_SS) # Log transform
+tf_SS_norm <- sweep(tf_SS_norm, 2, tmpMeans, FUN = "-") # scale
+tf_SS_norm <- sweep(tf_SS_norm, 2, tmpSds, FUN = "/") # scale
+```
+
+The last step before clustering is PCA.
+
+```{r}
+pca_reg <- prcomp(reg_SS_norm)
+pca_tf <- scale(tf_SS_norm, pca_reg$center, pca_reg$scale) %*% pca_reg$rotation
+```
+
+For clustering, we chose 6 clusters to reflect the analysis in [@cellcycle], with each cluster representing a phase in the cell cycle. In the paper, the clusters formed a ring to represent the cell cycle, so we are interested in seeing how the ensembles we've generated match up to that qualitative description.
+
+```{r}
+
+k_use <- 6
+dist_mat_reg <- dist(pca_reg$x)
+hc_reg <- hclust(dist_mat_reg, method = "ward.D2")
+cluster_labels_reg <- cutree(hc_reg, k = k_use)
+
+dist_mat_tf <- dist(pca_tf)
+hc_tf <- hclust(dist_mat_tf, method = "ward.D2")
+cluster_labels_tf <- cutree(hc_tf, k = k_use)
+
+```
+
+```{r echo=FALSE}
+clust_colors <- c("#E41A1C", "#377EB8", "#4DAF4A",
+               "#984EA3", "#FF7F00", "#A65628")
+
+pc1_weight <- round(100*summary(pca_reg)$importance[2,1],2)
+pc2_weight <- round(100*summary(pca_reg)$importance[2,2],2)
+plot_xlab <- paste("PC1 (",pc1_weight,"%)",sep="")
+plot_ylab <- paste("PC2 (",pc2_weight,"%)",sep="")
+
+image_reg <- ggplot(pca_reg$x, aes(x=PC1, y=PC2, color=as.factor(cluster_labels_reg))) +
+  geom_point(size=2) +
+  scale_color_manual(values= clust_colors) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  labs(color="Cluster") + 
+  ggtitle("Diverse Model") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14),
+        plot.title = element_text(size = 22, hjust = 0.5))
+image_reg
+
+clust_colors_tf <- c("#E41A1C", "#FF7F00","#4DAF4A",
+                     "#984EA3","#377EB8", "#A65628")
+
+image_tf <- ggplot(pca_tf, aes(x=PC1, y=PC2, color=as.factor(cluster_labels_tf))) +
+  geom_point(size=2) +
+  scale_color_manual(values= clust_colors_tf) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  labs(color="Cluster") + 
+  ggtitle("TF-only Model") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14),
+        plot.title = element_text(size = 22, hjust = 0.5))
+image_tf
+```
+
+We can see that the ring-like structure is preserved in either regulatory regime.
+
+## Comparison of Limit Cycle Properties
+Another comparison to make between the diverse and TF-only versions of the cell cycle GRN is to compare the behavior of the simulated limit cycles. We can see that both ensembles have a similar amount of limit cycles produced, but we can also compare their average periods of oscillation:
+```{r}
+
+reg_periods <- LC_reg %>%
+  distinct(model = LC_reg[[1]], period = LC_reg[[3]]) %>%
+  pull(period)
+tf_periods <- LC_tf %>%
+  distinct(model = LC_tf[[1]], period = LC_tf[[3]]) %>%
+  pull(period)
+
+ccRegMeanPeriod <- mean(reg_periods)*0.01
+ccTFMeanPeriod <- mean(tf_periods)*0.01
+
+ccRegSTDPeriod <- sd(reg_periods)*0.01
+ccTFSTDPeriod <- sd(tf_periods)*0.01
+
+stats_cc <- data.frame(
+  group = c("Diverse Model", "TF-Only Model"),
+  mean  = c(ccRegMeanPeriod, ccTFMeanPeriod),
+  sd    = c(ccRegSTDPeriod, ccTFSTDPeriod)
+)
+
+image_period <- ggplot(stats_cc, aes(x = group, y = mean)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.2) +
+  ylab("Period (Unit Time)") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 14, face="bold"))
+
+image_period
+```
+
+From the bar plot, it can be seen that the TF-only model produces much longer limit cycles on average. In [@cellcycle], it is stated that limit cycles represent state transitions between portions of the cell cycle, so the TF-only regime would predict much longer transitions compared to the diverse model with different interaction types.
+
+## Limit cycle Visualization
+
+Lastly, we present a demonstration on how to visualize the limit cycles produced by the simulation as time series to show how different genes change within the limit cycle. The simulations stores complete oscillations as time series in the output, so plotting is simple. As example, we look at the limit cycle generated by model 880 in the ensemble for the diverse regulatory regime.
+
+```{r}
+example_LC <- as.matrix(LC_reg[LC_reg[[1]] == 449, 4:ncol(LC_reg)])
+```
+
+We can still normalize before plotting.
+```{r}
+example_LC <- log2(1+example_LC)
+example_LC<- sweep(example_LC, 2, tmpMeans, FUN = "-") # scale
+example_LC <- sweep(example_LC, 2, tmpSds, FUN = "/") # scale
+```
+
+
+```{r echo=FALSE}
+example_LC <- as.data.frame(example_LC)
+LC_long <- example_LC %>%
+  mutate(Time = (1:n())*0.02) %>%      # add a time index
+  pivot_longer(-Time, 
+               names_to = "Series", 
+               values_to = "Value")
+
+# Plot all series
+ggplot(LC_long, aes(x = Time, y = Value, color = Series)) +
+  geom_line(linewidth = 1) +
+  theme_minimal() +
+  labs(title = "Limit Cycle of Cell Cycle Gene Expression",
+       x = "Time", 
+       y = "Normalized Gene Expression",
+       color = "Gene")
+```
+
+# References
+
+
