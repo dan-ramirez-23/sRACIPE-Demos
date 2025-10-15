@@ -1,6 +1,6 @@
 ---
 title: "Regulation Type Comparison for Toggle Switch"
-author: "Aidan Tillman"
+author: "Aidan Tillman, Daniel Ramirez"
 output: html_document
 ---
 
@@ -15,21 +15,28 @@ library(ggplot2)
 ```
 
 ## Introduction 
-Here we use some synthetic circuits to compare how distributions of features changes when depending on whether Transcription Factor (TF) or Protein Degradation (PD) regulation occurs. To begin, we pull both forms of the circuit from the topos file in this directory.
-
-```{r warning=FALSE}
-toggleSwitch_tf <- read.table(file.path(paste0("toggleSwitch",".tpo")), header=T)
-toggleSwitch_pd <- read.table(file.path(paste0("toggleSwitch_pd",".tpo")), header=T)
-```
-
-Next we run simulations of both to produce steady states.
+Here we use some synthetic circuits to compare how distributions of features changes when depending on whether Transcription Factor (TF) or Protein Degradation (PD) regulation occurs. To begin, we pull both forms of the circuit from the topos folder and generate ensembles for analysis.
 
 ```{r message=FALSE, warning=FALSE}
-ts_tfSet <- sracipeSimulate(circuit = toggleSwitch_tf, numModels = 1000, nIC = 5,
-                            uniqueDigits = 3)
-ts_pdSet <- sracipeSimulate(circuit = toggleSwitch_pd, numModels = 1000, nIC = 5,
-                            uniqueDigits = 3)
+toggleSwitch_tf <- read.table(file.path("../topos",paste0("toggleSwitch",".tpo")), header=T)
+toggleSwitch_pd <- read.table(file.path("../topos",paste0("toggleSwitch_pd",".tpo")), header=T)
 ```
+
+
+```{r eval=FALSE}
+
+ts_tfSet <- sracipeSimulate(circuit = toggleSwitch_tf, numModels = 1000, nIC = 200,
+                            uniqueDigits = 2)
+ts_pdSet <- sracipeSimulate(circuit = toggleSwitch_pd, numModels = 1000, nIC = 200,
+                            uniqueDigits = 2, foldChangeMinDeg = 1, foldChangeMaxDeg = 100)
+```
+
+```{r}
+load(file.path("../regCompData",paste0("ts_tfSet",".RDA")))
+load(file.path("../regCompData",paste0("ts_pdSet",".RDA")))
+
+```
+
 
 ## Bistability Analysis
 The first comparison we can make is by checking how robust bistability is in the circuit under each regulation type. One way to do this is by comparing the fraction of models with 2 steady states in each ensemble. To simplify these types of calculations, the number of unique steady states per model in the ensemble is automatically stored in the output metadata when nIC > 1 
@@ -40,17 +47,51 @@ ts_pdStateCounts <- ts_pdSet@metadata[["uniqueStateCounts"]][["UniqueStableState
 ```
 
 From here, we can make a bar plot to compare the proportions of bistability
-```{r}
-ts_tfFraction <- sum(ts_tfStateCounts == 2) / length(ts_tfStateCounts)
-ts_pdFraction <- sum(ts_pdStateCounts == 2) / length(ts_pdStateCounts)
+```{r echo=FALSE}
 
-tsFractions <- c(TF = ts_tfFraction, PD = ts_pdFraction)
 
-barplot(tsFractions,
-        ylim = c(0, 0.2),
-        ylab = "Bistable Fraction",
-        main = "Proportion of Bistability in Different TS Models",
-        col = "skyblue")
+state_pd_plot <- data.frame(
+  setup= "PD",
+  stateCount = ts_pdStateCounts
+)
+state_tf_plot <- data.frame(
+    setup= "TF",
+    stateCount = ts_tfStateCounts
+)
+
+state_plot <- bind_rows(state_pd_plot, state_tf_plot)
+
+state_plot <- state_plot %>% filter(stateCount %in% 1:6)
+
+state_summary <- state_plot %>%
+  group_by(setup, stateCount) %>%
+  summarise(count = n()) %>%
+  group_by(setup) %>%
+  mutate(prop = count / sum(count))
+
+plot_group <- function(g) {
+  ggplot(dplyr::filter(state_summary),
+         aes(x = factor(stateCount), y = prop, fill = setup)) +
+    geom_col(position = "dodge") +
+    scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+    labs(
+      x = "State Count",
+      y = "Proportion",
+      fill = "Setup",
+      title = paste("Group")
+    ) +
+    theme_minimal()  +
+    theme(
+      axis.text.x = element_text(size = 16),
+      axis.text.y = element_text(size = 16, face="bold"),
+      axis.title = element_text(size = 16))
+}
+
+plot_group0 <- plot_group(0)
+
+# Example: print them
+print(plot_group0)
+
 
 ```
 
@@ -127,6 +168,8 @@ image_tf <- ggplot(pca_tf$x, aes(x=PC1, y=PC2, color=as.factor(cluster_labels_tf
   scale_color_manual(values=c("blue", "red")) +
   xlab(plot_xlab) +
   ylab(plot_ylab) +
+  xlim(-2.8,2.8) + 
+  ylim(-2,2) +
   labs(color="Cluster") + 
   ggtitle("Toggle Switch TF") +
   theme(axis.line = element_line(linewidth = 1, color = "black"), 
@@ -146,6 +189,8 @@ image_pd <- ggplot(pca_pd, aes(x=PC1, y=PC2, color=as.factor(cluster_labels_pd))
   scale_color_manual(values=c("blue", "red")) +
   xlab(plot_xlab) +
   ylab(plot_ylab) +
+  xlim(-2.8,2.8) + 
+  ylim(-2,2) +
   labs(color="Cluster") + 
   ggtitle("Toggle Switch PD") +
   theme(axis.line = element_line(linewidth = 1, color = "black"), 

@@ -1,0 +1,265 @@
+---
+title: "Regulation Comparison of Extended Repressilator"
+author: "Aidan Tillman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(sRACIPE)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+```
+
+## Introduction
+
+```{r message=FALSE, warning=FALSE}
+extendedRep_tf <- read.table(file.path("../topos",paste0("extendedRep_tf",".tpo")), header=T)
+extendedRep_pd <- read.table(file.path("../topos",paste0("extendedRep_pd",".tpo")), header=T)
+```
+
+
+```{r eval=FALSE}
+extendedTFSet <- sracipeSimulate(circuit = extendedRep_tf, numModels = 1000, nIC = 5,
+                                 numConvergenceIter = 50, integrateStepSize = 0.02, 
+                                 foldChangeMin = 1, foldChangeMax = 100, limitcycles = TRUE,
+                                 maxLCs = 1)
+extendedPDSet <- sracipeSimulate(circuit = extendedRep_pd, numModels = 1000, nIC = 5,
+                                 numConvergenceIter = 50, integrateStepSize = 0.02,  
+                                 foldChangeMinDeg = 1, foldChangeMaxDeg = 10, limitcycles = TRUE,
+                                 maxLCs = 1)
+```
+
+```{r}
+load(file.path("../regCompData",paste0("extendedRep_tf",".RDA")))
+load(file.path("../regCompData",paste0("extendedRep_pd",".RDA")))
+
+```
+
+```{r}
+extendedTFSet <- sracipeConvergeDist(extendedTFSet)
+extendedPDSet <- sracipeConvergeDist(extendedPDSet)
+```
+
+## Comparison of Dynamical Mode distributions
+
+```{r}
+extendedRep_tfStateCounts <- extendedTFSet@metadata[["uniqueStateCounts"]][["UniqueStableStateNo"]]
+extendedRep_pdStateCounts <- extendedPDSet@metadata[["uniqueStateCounts"]][["UniqueStableStateNo"]]
+```
+
+```{r}
+LC_tf <- metadata(extendedTFSet)$LCData
+LC_pd <- metadata(extendedPDSet)$LCData
+
+tf_LCbool <- integer(1000)
+tf_LCbool[LC_tf[[1]]] <- 1
+
+pd_LCbool <- integer(1000)
+pd_LCbool[LC_pd[[1]]] <- 1
+
+```
+
+
+```{r echo=FALSE}
+## Plot PD data
+
+state_pd_plot <- data.frame(
+  stateCount = extendedRep_pdStateCounts,
+  group = factor(pd_LCbool)  # 0/1 LC indicator
+)
+
+# Only look at models with at most 1 steady states
+state_pd_plot <- state_pd_plot %>%
+  filter((stateCount %in% 0:4))
+
+# Count state counts and convert to proportions, distinguishing between existence of LCs
+state_pd_summary <- state_pd_plot %>%
+  count(stateCount, group) %>%
+  mutate(prop = n / length(extendedRep_pdStateCounts))
+
+state_pd_summary <- state_pd_summary %>%
+  mutate(group = recode(group,
+                        `0` = "No Limit Cycle",
+                        `1` = "Limit Cycle Detected"))
+
+# Handle 0 proportions for plotting
+state_pd_summary <- state_pd_summary %>%
+  complete(stateCount, group, fill = list(n = 0, prop = 0))
+
+# Plot proportions
+image_pdState <- ggplot(state_pd_summary, aes(x = factor(stateCount), y = prop, fill = group)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(x = "Steady State Count", 
+       y = "Proportion of Models", 
+       fill = "Limit Cycle Indicator",
+       title = "PD Model") +
+  theme_minimal() +
+    theme(
+      axis.text.x = element_text(size = 14),
+      axis.text.y = element_text(size = 14, face="bold"),
+      axis.title = element_text(size = 16))
+print(image_pdState)
+
+
+## Plot TF data
+
+state_tf_plot <- data.frame(
+  stateCount = extendedRep_tfStateCounts,
+  group = factor(tf_LCbool)  # 0/1 LC indicator
+)
+
+# Only look at models with at most 2 steady states
+state_tf_plot <- state_tf_plot %>%
+  filter((stateCount %in% 0:5))
+
+# Count state counts and convert to proportions, distinguishing between existence of LCs
+state_tf_summary <- state_tf_plot %>%
+  count(stateCount, group) %>%
+  mutate(prop = n / length(extendedRep_tfStateCounts))
+
+state_tf_summary <- state_tf_summary %>%
+  mutate(group = recode(group,
+                        `0` = "No Limit Cycle",
+                        `1` = "Limit Cycle Detected"))
+
+# Handle 0 proportions for plotting
+state_tf_summary <- state_tf_summary %>%
+  complete(stateCount, group, fill = list(n = 0, prop = 0)) 
+
+# Plot proportions
+image_tfState <- ggplot(state_tf_summary, aes(x = factor(stateCount), y = prop, fill = group)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(x = "Steady State Count", 
+       y = "Proportion of Models", 
+       fill = "Limit Cycle Indicator",
+       title = "TF Model") +
+  theme_minimal() +
+    theme(
+      axis.text.x = element_text(size = 14),
+      axis.text.y = element_text(size = 14, face="bold"),
+      axis.title = element_text(size = 16))
+
+print(image_tfState)
+```
+
+
+## Comparison of State distributions
+
+```{r}
+extended_tf_SS <- sracipeUniqueStates(extendedTFSet)
+extended_pd_SS <- sracipeUniqueStates(extendedPDSet)
+```
+
+
+```{r}
+extended_tf_SS <- Filter(function(x) nrow(x) > 0 && ncol(x) > 0, extended_tf_SS)
+extended_tf_SS <- t(do.call(cbind, extended_tf_SS))
+
+extended_pd_SS <- Filter(function(x) nrow(x) > 0 && ncol(x) > 0, extended_pd_SS)
+extended_pd_SS <- t(do.call(cbind, extended_pd_SS))
+```
+
+```{r}
+
+tmpMeans <- rowMeans(t(log2(1+extended_tf_SS)))
+tmpSds <- apply(t(log2(1+extended_tf_SS)),1,sd)
+tf_SS_norm <- log2(1+extended_tf_SS)
+tf_SS_norm <- sweep(tf_SS_norm, 2, tmpMeans, FUN = "-") # scale
+tf_SS_norm <- sweep(tf_SS_norm, 2, tmpSds, FUN = "/") # scale
+
+pd_SS_norm <- log2(1+extended_pd_SS) # Log transform
+pd_SS_norm <- sweep(pd_SS_norm, 2, tmpMeans, FUN = "-") # scale
+pd_SS_norm <- sweep(pd_SS_norm, 2, tmpSds, FUN = "/") # scale
+
+```
+
+Next, PCA is performed on the TF data, and we continue to project the PD data into the PCA space for the TF data.
+
+```{r}
+pca_tf <- prcomp(tf_SS_norm)
+pca_pd <- scale(pd_SS_norm, pca_tf$center, pca_tf$scale) %*% pca_tf$rotation
+
+```
+
+
+```{r}
+
+k_use <- 6
+dist_mat_tf <- dist(pca_tf$x)
+hc_tf <- hclust(dist_mat_tf, method = "ward.D2")
+cluster_labels_tf <- cutree(hc_tf, k = k_use)
+
+dist_mat_pd <- dist(pca_pd)
+hc_pd <- hclust(dist_mat_pd, method = "ward.D2")
+cluster_labels_pd <- cutree(hc_pd, k = k_use)
+
+```
+
+
+The last step is plot the results of the clustering as projected onto the same PCA space. This gives a clear visualization of how the distribution changes shape between distribution types.
+
+```{r echo=FALSE}
+clust_colors <- c("#E41A1C", "#377EB8", "#4DAF4A",
+               "#984EA3", "#FF7F00", "#A65628")
+
+pc1_weight <- round(100*summary(pca_tf)$importance[2,1],2)
+pc2_weight <- round(100*summary(pca_tf)$importance[2,2],2)
+plot_xlab <- paste("PC1 (",pc1_weight,"%)",sep="")
+plot_ylab <- paste("PC2 (",pc2_weight,"%)",sep="")
+
+image_tf <- ggplot(pca_tf$x, aes(x=PC1, y=PC2, color=as.factor(cluster_labels_tf))) +
+  geom_point(size=2) +
+  scale_color_manual(values=clust_colors) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  ylim(-4,4) +
+  labs(color="Cluster") + 
+  ggtitle("Extended Repressilator TF") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14),
+        plot.title = element_text(size = 22, hjust = 0.5))
+image_tf
+
+clust_colors_pd <- c("#4DAF4A", "#E41A1C", "#A65628",
+               "#984EA3", "#FF7F00", "#377EB8")
+
+image_pd <- ggplot(pca_pd, aes(x=PC1, y=PC2, color=as.factor(cluster_labels_pd))) +
+  geom_point(size=2) +
+  scale_color_manual(values=clust_colors_pd) +
+  xlab(plot_xlab) +
+  ylab(plot_ylab) +
+  ylim(-4,4) +
+  labs(color="Cluster") + 
+  ggtitle("Extended Repressilator PD") +
+  theme(axis.line = element_line(linewidth = 1, color = "black"), 
+        axis.ticks = element_line(linewidth = 1, color="black"),
+        panel.background = element_rect("white"),
+        plot.background = element_rect("white"),
+        axis.title = element_text(size=28),
+        axis.text = element_text(size=24),
+        legend.title = element_text(size=18),
+        legend.text = element_text(size=14),
+        plot.title = element_text(size = 22, hjust = 0.5))
+image_pd
+```
+
+## Comparison of Limit Cycle Properties
+
+```{r}
+
+```
+
