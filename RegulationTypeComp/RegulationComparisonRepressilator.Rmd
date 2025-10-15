@@ -14,6 +14,7 @@ library(sRACIPE)
 library(ggplot2)
 library(tidyr)
 library(dplyr)
+library(ComplexHeatmap)
 ```
 
 ## Introduction
@@ -237,6 +238,27 @@ image_period <- ggplot(stats_cc, aes(x = group, y = mean)) +
   theme_minimal()
 
 image_period
+
+```
+
+```{r}
+# Heatmap
+image <- Heatmap(as.matrix(t(tf_SS_norm)), 
+                 name = "Expression (TF)", 
+                 row_names_gp=gpar(fontsize=12),
+                 clustering_method_columns = "ward.D2",
+                 show_column_names = F)
+image
+
+
+
+image <- Heatmap(as.matrix(t(pd_SS_norm)), 
+                 name = "Expression (PD)",
+                 row_names_gp=gpar(fontsize=12),
+                 clustering_method_columns = "ward.D2",
+                 show_column_names = F)
+image
+  
 
 ```
 
